@@ -11,7 +11,8 @@ This repo does **not** run a model. It exposes your existing local endpoint (def
 
 ## Quick Start (copy/paste)
 ```bash
-cd /Users/omertekin/Desktop/Grind/ngrok-proxy-llm
+git clone https://github.com/omertekin2002/ngrok-proxy-llm.git
+cd ngrok-proxy-llm
 make setup
 ```
 
@@ -37,7 +38,7 @@ Use that `Public URL` as your external base URL.
 
 ## Where to put the ngrok token
 Put it in:
-- `/Users/omertekin/Desktop/Grind/ngrok-proxy-llm/.env`
+- `.env` at the repo root
 
 Required key:
 - `NGROK_AUTH_TOKEN=...`
