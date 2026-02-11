@@ -1,109 +1,110 @@
 # ngrok-proxy-llm
 
-Simple local-to-public pipeline for an already-running LLM API.
+Expose local AI services through ngrok.
 
-This repo does **not** run a model. It exposes your existing local endpoint (default: `http://localhost:8317`) through ngrok so external clients can call it.
+This repo now supports a **single ngrok URL** for:
+- existing local LLM API (proxied from `http://localhost:8317` by default)
+- local Whisper STT endpoints (`/v1/audio/transcriptions`, `/v1/audio/translations`)
+
+On Apple Silicon, STT defaults to the **MLX backend** (GPU/NPU path) instead of CPU-only `faster-whisper`.
 
 ## Prerequisites
 - Python 3.9+
-- An ngrok account and auth token
-- Your LLM API already running locally (default: `http://localhost:8317`)
+- ngrok account + auth token
+- Local LLM API already running (default: `http://localhost:8317`)
 
-## Quick Start (copy/paste)
+## Quick Start (single URL for LLM + STT)
 ```bash
 git clone https://github.com/omertekin2002/ngrok-proxy-llm.git
 cd ngrok-proxy-llm
 make setup
 ```
 
-Open `.env` and set your token:
+Edit `.env` and set at least:
 ```env
 NGROK_AUTH_TOKEN=your_real_ngrok_token_here
 ```
 
-Start the tunnel:
+Run unified pipeline:
 ```bash
 make run
 ```
 
-You will see output like:
-- `Local URL : http://localhost:8317`
-- `Public URL: https://<random>.ngrok-free.dev`
+What `make run` does:
+1. Starts local STT service on `http://localhost:8320`
+2. Serves Whisper endpoints locally at `/v1/audio/*`
+3. Proxies all non-audio requests to your LLM backend (`LLM_LOCAL_URL`)
+4. Opens one ngrok tunnel to that unified local service
 
-Use that `Public URL` as your external base URL.
-
-## One-command workflow
-- `make setup`: creates `.venv`, installs dependencies, and copies `.env.example` to `.env` if missing.
-- `make run`: starts the ngrok tunnel using your `.env` settings.
-
-## Where to put the ngrok token
-Put it in:
-- `.env` at the repo root
-
-Required key:
-- `NGROK_AUTH_TOKEN=...`
-
-You can get your token from [ngrok dashboard](https://dashboard.ngrok.com/get-started/your-authtoken).
-
-## What the pipeline does
-1. Reads `NGROK_AUTH_TOKEN` from `.env` (or environment).
-2. Checks your local endpoint is reachable.
-3. Opens an HTTPS ngrok tunnel to your local service.
-4. Prints public endpoints.
-5. Keeps the tunnel alive until `Ctrl+C`.
-
-## Default endpoints
-If your public URL is `https://example.ngrok-free.dev`, likely endpoints are:
+## Endpoints on the same public URL
+If ngrok prints `https://example.ngrok-free.dev`, you can use:
 - `https://example.ngrok-free.dev/v1/models`
 - `https://example.ngrok-free.dev/v1/chat/completions`
-- `https://example.ngrok-free.dev/docs`
+- `https://example.ngrok-free.dev/v1/responses`
+- `https://example.ngrok-free.dev/v1/audio/transcriptions`
+- `https://example.ngrok-free.dev/v1/audio/translations`
 
-## Configuration
-```bash
-# Expose a different local service
-python run.py --local-url http://localhost:9000
+## Make targets
+- `make setup`: install full dependencies and create `.env` if missing
+- `make run`: unified mode, one ngrok URL for both LLM + STT
+- `make run-llm`: tunnel only your existing LLM backend
+- `make stt-setup`: install STT dependencies
+- `make stt-run`: run only local STT service on port `8320`
+- `make stt-tunnel`: tunnel only STT service
 
-# Change health check path
-python run.py --health-path /health
+## Configuration (.env)
+Required:
+- `NGROK_AUTH_TOKEN=...`
 
-# Skip health check
-python run.py --skip-health-check
-
-# Force ngrok region
-python run.py --region us
-
-# Use a reserved ngrok domain (if your plan supports it)
-python run.py --domain your-subdomain.ngrok.app
-```
-
-Optional `.env` keys:
-- `LOCAL_URL=http://localhost:8317`
+Common optional values:
+- `LLM_LOCAL_URL=http://localhost:8317`
+- `STT_PORT=8320`
 - `NGROK_REGION=us`
 - `NGROK_DOMAIN=your-subdomain.ngrok.app`
+- `HF_TOKEN=hf_xxx` (only needed for private/gated HF assets)
+- `STT_BACKEND=mlx`
+- `WHISPER_MODEL=mlx-community/whisper-large-v3-turbo`
+- `MLX_FP16=true`
+- `WHISPER_MODEL=large-v3` (if `STT_BACKEND=faster-whisper`)
+- `WHISPER_DEVICE=auto`
+- `WHISPER_COMPUTE_TYPE=int8`
+- `STT_EAGER_LOAD=true`
+- `STT_IDLE_UNLOAD_SECONDS=900`
+- `STT_IDLE_CHECK_SECONDS=15`
 
-## Smoke test
-After `python run.py` prints a public URL, test from another terminal:
+### Idle unload (memory saver)
+To automatically release model memory after inactivity, set:
 
+```env
+STT_IDLE_UNLOAD_SECONDS=600
+```
+
+Behavior:
+- Model unloads after the configured idle period.
+- Next transcription request auto-loads the model again.
+- Check current state at `GET /health` (`model_loaded`, `idle_seconds`).
+
+## Smoke tests
+### LLM
 ```bash
 curl https://YOUR_PUBLIC_URL/v1/models
 ```
 
-And a chat call:
-
+### STT
 ```bash
-curl -X POST https://YOUR_PUBLIC_URL/v1/chat/completions \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "gpt-5",
-    "messages": [{"role": "user", "content": "Say hello"}]
-  }'
+curl -X POST https://YOUR_PUBLIC_URL/v1/audio/transcriptions \
+  -F "file=@/absolute/path/to/audio.m4a" \
+  -F "model=whisper-1"
 ```
 
 ## Troubleshooting
-- `Missing NGROK_AUTH_TOKEN`: set token in `.env`.
-- `Could not connect to local endpoint`: your local LLM API is not running or wrong `--local-url`.
-- Tunnel starts but model calls fail: check your local API directly first:
+- `Missing NGROK_AUTH_TOKEN`: set token in `.env`
+- STT takes long on first run: model download can take several minutes (MLX `large-v3-turbo` is multiple GB)
+- STT decode errors: install ffmpeg (`brew install ffmpeg`)
+- LLM calls failing in unified mode: verify local LLM first:
   - `curl http://localhost:8317/v1/models`
+- To force CPU fallback: set `STT_BACKEND=faster-whisper` in `.env`
+- To disable idle unload: set `STT_IDLE_UNLOAD_SECONDS=0`
 
 ## Stop
-Press `Ctrl+C` in the tunnel terminal to close ngrok.
+Press `Ctrl+C` in the running `make run` terminal.

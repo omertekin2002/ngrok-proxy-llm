@@ -112,7 +112,7 @@ def main() -> int:
     public_url = tunnel.public_url.rstrip("/")
 
     print("=" * 60)
-    print("LLM tunnel is live")
+    print("Tunnel is live")
     print("=" * 60)
     print(f"Local URL : {args.local_url}")
     print(f"Public URL: {public_url}")
@@ -120,6 +120,9 @@ def main() -> int:
     print("Likely endpoints:")
     print(f"  {public_url}/v1/models")
     print(f"  {public_url}/v1/chat/completions")
+    print(f"  {public_url}/v1/responses")
+    print(f"  {public_url}/v1/audio/transcriptions")
+    print(f"  {public_url}/v1/audio/translations")
     print(f"  {public_url}/docs")
     print("=" * 60)
     print("Press Ctrl+C to stop and close the tunnel.")

@@ -1,17 +1,38 @@
 SHELL := /bin/zsh
 
-.PHONY: setup run help
+LLM_LOCAL_URL ?= http://localhost:8317
+STT_PORT ?= 8320
+
+.PHONY: setup run help run-llm stt-setup stt-run stt-tunnel
 
 help:
 	@echo "Available targets:"
-	@echo "  make setup  - create .venv, install deps, and create .env if missing"
-	@echo "  make run    - start ngrok tunnel via run.py"
+	@echo "  make setup      - create .venv, install deps, and create .env if missing"
+	@echo "  make run        - one ngrok URL for both LLM + STT"
+	@echo "  make run-llm    - tunnel only the existing LLM endpoint"
+	@echo "  make stt-setup   - install STT dependencies"
+	@echo "  make stt-run     - run local Whisper STT API on port $(STT_PORT)"
+	@echo "  make stt-tunnel  - expose local STT API via ngrok"
 
 setup:
 	@test -d .venv || python3 -m venv .venv
-	@. .venv/bin/activate && pip install -r requirements.txt
+	@. .venv/bin/activate && pip install -r requirements-stt.txt
 	@test -f .env || cp .env.example .env
 	@echo "Setup complete. Edit .env and set NGROK_AUTH_TOKEN if needed."
 
 run:
-	@. .venv/bin/activate && python run.py
+	@. .venv/bin/activate && python run_pipeline.py --llm-url $(LLM_LOCAL_URL) --stt-port $(STT_PORT)
+
+run-llm:
+	@. .venv/bin/activate && python run.py --local-url $(LLM_LOCAL_URL)
+
+stt-setup:
+	@test -d .venv || python3 -m venv .venv
+	@. .venv/bin/activate && pip install -r requirements-stt.txt
+	@echo "STT dependencies installed."
+
+stt-run:
+	@. .venv/bin/activate && uvicorn stt_api:app --host 0.0.0.0 --port $(STT_PORT)
+
+stt-tunnel:
+	@. .venv/bin/activate && python run.py --local-url http://localhost:$(STT_PORT) --health-path /health
