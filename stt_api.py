@@ -23,7 +23,6 @@ from dotenv import load_dotenv
 import httpx
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, PlainTextResponse, StreamingResponse
-from starlette.background import BackgroundTask
 
 load_dotenv()
 
@@ -533,10 +532,20 @@ async def proxy_to_llm(path: str, request: Request):
             detail=f"Failed to reach LLM backend at {LLM_BASE_URL}: {exc}",
         ) from exc
 
+    async def upstream_body():
+        try:
+            async for chunk in upstream_response.aiter_raw():
+                if chunk:
+                    yield chunk
+        except (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+            # Upstream closed/reset mid-stream. End stream gracefully instead of crashing ASGI task group.
+            print(f"[proxy] Upstream stream interrupted ({type(exc).__name__}): {exc}")
+        finally:
+            await upstream_response.aclose()
+
     response_headers = _forward_headers(upstream_response.headers)
     return StreamingResponse(
-        upstream_response.aiter_raw(),
+        upstream_body(),
         status_code=upstream_response.status_code,
         headers=response_headers,
-        background=BackgroundTask(upstream_response.aclose),
     )
