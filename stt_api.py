@@ -50,6 +50,11 @@ LLM_BASE_URL = os.getenv("LLM_BASE_URL", "http://localhost:8317").rstrip("/")
 STT_IDLE_UNLOAD_SECONDS = int(os.getenv("STT_IDLE_UNLOAD_SECONDS", "900"))
 STT_IDLE_CHECK_SECONDS = int(os.getenv("STT_IDLE_CHECK_SECONDS", "15"))
 STT_EAGER_LOAD = os.getenv("STT_EAGER_LOAD", "true").strip().lower() in {"1", "true", "yes", "on"}
+PROXY_RETRY_ATTEMPTS = int(os.getenv("PROXY_RETRY_ATTEMPTS", "2"))
+PROXY_RETRY_BACKOFF_SECONDS = float(os.getenv("PROXY_RETRY_BACKOFF_SECONDS", "0.35"))
+PROXY_RETRY_MAX_BACKOFF_SECONDS = float(os.getenv("PROXY_RETRY_MAX_BACKOFF_SECONDS", "2.0"))
+PROXY_RETRYABLE_STATUS_CODES = {502, 503, 504}
+PROXY_RETRYABLE_METHODS = {"GET", "HEAD"}
 
 app = FastAPI(title="Whisper STT API", version="1.0.0")
 _model: Optional[Any] = None
@@ -503,6 +508,77 @@ def _forward_headers(headers: Any) -> Dict[str, str]:
     return forwarded
 
 
+def _retry_delay_seconds(attempt_index: int) -> float:
+    delay = PROXY_RETRY_BACKOFF_SECONDS * (2**attempt_index)
+    return min(PROXY_RETRY_MAX_BACKOFF_SECONDS, delay)
+
+
+def _retry_enabled_for_method(method: str) -> bool:
+    return method.upper() in PROXY_RETRYABLE_METHODS and PROXY_RETRY_ATTEMPTS > 0
+
+
+async def _send_upstream_request(
+    *,
+    method: str,
+    url: str,
+    headers: Dict[str, str],
+    body: bytes,
+    timeout: httpx.Timeout,
+) -> httpx.Response:
+    retryable_method = _retry_enabled_for_method(method)
+    total_attempts = (PROXY_RETRY_ATTEMPTS + 1) if retryable_method else 1
+    retryable_errors = (
+        httpx.ConnectError,
+        httpx.ConnectTimeout,
+        httpx.ReadError,
+        httpx.ReadTimeout,
+        httpx.RemoteProtocolError,
+    )
+
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
+        for attempt in range(total_attempts):
+            try:
+                upstream_request = client.build_request(
+                    method=method,
+                    url=url,
+                    headers=headers,
+                    content=body,
+                )
+                upstream_response = await client.send(upstream_request, stream=True)
+            except retryable_errors as exc:
+                if retryable_method and attempt + 1 < total_attempts:
+                    delay = _retry_delay_seconds(attempt)
+                    print(
+                        f"[proxy] {method} retry {attempt + 1}/{total_attempts - 1} "
+                        f"after {type(exc).__name__}: {exc} (sleep {delay:.2f}s)"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+                raise
+            except httpx.RequestError:
+                raise
+
+            if (
+                retryable_method
+                and upstream_response.status_code in PROXY_RETRYABLE_STATUS_CODES
+                and attempt + 1 < total_attempts
+            ):
+                delay = _retry_delay_seconds(attempt)
+                status = upstream_response.status_code
+                await upstream_response.aclose()
+                print(
+                    f"[proxy] {method} retry {attempt + 1}/{total_attempts - 1} "
+                    f"after upstream status {status} (sleep {delay:.2f}s)"
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            return upstream_response
+
+    # Defensive fallback; loop always returns or raises.
+    raise RuntimeError("Upstream retry loop ended unexpectedly.")
+
+
 @app.api_route(
     "/{path:path}",
     methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"],
@@ -518,14 +594,13 @@ async def proxy_to_llm(path: str, request: Request):
 
     timeout = httpx.Timeout(connect=15.0, write=60.0, read=None, pool=30.0)
     try:
-        async with httpx.AsyncClient(timeout=timeout, follow_redirects=False) as client:
-            upstream_request = client.build_request(
-                method=request.method,
-                url=upstream_url,
-                headers=req_headers,
-                content=body,
-            )
-            upstream_response = await client.send(upstream_request, stream=True)
+        upstream_response = await _send_upstream_request(
+            method=request.method,
+            url=upstream_url,
+            headers=req_headers,
+            body=body,
+            timeout=timeout,
+        )
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,

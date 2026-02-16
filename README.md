@@ -71,6 +71,9 @@ Common optional values:
 - `STT_EAGER_LOAD=true`
 - `STT_IDLE_UNLOAD_SECONDS=900`
 - `STT_IDLE_CHECK_SECONDS=15`
+- `PROXY_RETRY_ATTEMPTS=2`
+- `PROXY_RETRY_BACKOFF_SECONDS=0.35`
+- `PROXY_RETRY_MAX_BACKOFF_SECONDS=2.0`
 
 ### Idle unload (memory saver)
 To automatically release model memory after inactivity, set:
@@ -83,6 +86,9 @@ Behavior:
 - Model unloads after the configured idle period.
 - Next transcription request auto-loads the model again.
 - Check current state at `GET /health` (`model_loaded`, `idle_seconds`).
+
+### LLM proxy retries
+For transient upstream hiccups, idempotent proxy calls (`GET`/`HEAD`) retry automatically with exponential backoff.
 
 ## Smoke tests
 ### LLM
