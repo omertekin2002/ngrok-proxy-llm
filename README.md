@@ -74,6 +74,7 @@ Common optional values:
 - `PROXY_RETRY_ATTEMPTS=2`
 - `PROXY_RETRY_BACKOFF_SECONDS=0.35`
 - `PROXY_RETRY_MAX_BACKOFF_SECONDS=2.0`
+- `PROXY_RETRY_METHODS=GET,HEAD,POST`
 
 ### Idle unload (memory saver)
 To automatically release model memory after inactivity, set:
@@ -88,7 +89,20 @@ Behavior:
 - Check current state at `GET /health` (`model_loaded`, `idle_seconds`).
 
 ### LLM proxy retries
-For transient upstream hiccups, idempotent proxy calls (`GET`/`HEAD`) retry automatically with exponential backoff.
+For transient upstream hiccups, proxy calls retry automatically with exponential backoff.
+
+Default retry methods are:
+- `GET`
+- `HEAD`
+- `POST`
+
+To customize:
+
+```env
+PROXY_RETRY_METHODS=GET,HEAD,POST
+```
+
+Note: Retrying `POST` can repeat a request if the upstream partially processed the first attempt.
 
 ## Smoke tests
 ### LLM

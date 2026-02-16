@@ -54,7 +54,11 @@ PROXY_RETRY_ATTEMPTS = int(os.getenv("PROXY_RETRY_ATTEMPTS", "2"))
 PROXY_RETRY_BACKOFF_SECONDS = float(os.getenv("PROXY_RETRY_BACKOFF_SECONDS", "0.35"))
 PROXY_RETRY_MAX_BACKOFF_SECONDS = float(os.getenv("PROXY_RETRY_MAX_BACKOFF_SECONDS", "2.0"))
 PROXY_RETRYABLE_STATUS_CODES = {502, 503, 504}
-PROXY_RETRYABLE_METHODS = {"GET", "HEAD"}
+PROXY_RETRYABLE_METHODS = {
+    method.strip().upper()
+    for method in os.getenv("PROXY_RETRY_METHODS", "GET,HEAD,POST").split(",")
+    if method.strip()
+}
 
 app = FastAPI(title="Whisper STT API", version="1.0.0")
 _model: Optional[Any] = None
