@@ -47,7 +47,8 @@ If ngrok prints `https://example.ngrok-free.dev`, you can use:
 ## Make targets
 - `make setup`: install full dependencies and create `.env` if missing
 - `make run`: unified mode, one ngrok URL for both LLM + STT
-- `make run-llm`: tunnel only your existing LLM backend
+- `make run-llm`: LLM-only mode via retry proxy + ngrok
+- `make run-llm-direct`: direct LLM tunnel (no retry proxy)
 - `make stt-setup`: install STT dependencies
 - `make stt-run`: run only local STT service on port `8320`
 - `make stt-tunnel`: tunnel only STT service
@@ -58,6 +59,7 @@ Required:
 
 Common optional values:
 - `LLM_LOCAL_URL=http://localhost:8317`
+- `LLM_PROXY_PORT=8330`
 - `STT_PORT=8320`
 - `NGROK_REGION=us`
 - `NGROK_DOMAIN=your-subdomain.ngrok.app`
@@ -103,6 +105,8 @@ PROXY_RETRY_METHODS=GET,HEAD,POST
 ```
 
 Note: Retrying `POST` can repeat a request if the upstream partially processed the first attempt.
+
+`make run-llm` uses the same retry policy via a dedicated local LLM proxy before ngrok.
 
 ## Smoke tests
 ### LLM
