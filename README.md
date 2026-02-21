@@ -78,6 +78,7 @@ Common optional values:
 - `PROXY_RETRY_MAX_BACKOFF_SECONDS=2.0`
 - `PROXY_RETRY_METHODS=GET,HEAD,POST`
 - `PROXY_BUFFER_NON_STREAMING=true`
+- `PROXY_NONSTREAM_READ_RETRY_ATTEMPTS=1`
 
 ### Idle unload (memory saver)
 To automatically release model memory after inactivity, set:
@@ -111,6 +112,8 @@ Note: Retrying `POST` can repeat a request if the upstream partially processed t
 
 For non-streaming calls (`stream=false`), the proxy buffers the full upstream body before returning it.
 This avoids many intermittent `Upstream stream interrupted (ReadError)` logs caused by mid-stream disconnects.
+If the body read still fails after headers, the proxy can retry the full request using
+`PROXY_NONSTREAM_READ_RETRY_ATTEMPTS`.
 
 ## Smoke tests
 ### LLM

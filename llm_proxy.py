@@ -34,6 +34,7 @@ PROXY_BUFFER_NON_STREAMING = os.getenv("PROXY_BUFFER_NON_STREAMING", "true").str
     "yes",
     "on",
 }
+PROXY_NONSTREAM_READ_RETRY_ATTEMPTS = int(os.getenv("PROXY_NONSTREAM_READ_RETRY_ATTEMPTS", "1"))
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -172,7 +173,83 @@ async def proxy_to_llm(path: str, request: Request):
     body = await request.body()
     req_headers = _forward_headers(request.headers)
 
+    wants_streaming = _is_streaming_request(request, body)
     timeout = httpx.Timeout(connect=15.0, write=60.0, read=None, pool=30.0)
+
+    if PROXY_BUFFER_NON_STREAMING and not wants_streaming:
+        retryable_method = _retry_enabled_for_method(request.method)
+        total_read_attempts = (
+            PROXY_NONSTREAM_READ_RETRY_ATTEMPTS + 1 if retryable_method else 1
+        )
+
+        for read_attempt in range(total_read_attempts):
+            try:
+                upstream_response = await _send_upstream_request(
+                    method=request.method,
+                    url=upstream_url,
+                    headers=req_headers,
+                    body=body,
+                    timeout=timeout,
+                )
+            except httpx.RequestError as exc:
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed to reach LLM backend at {LLM_BASE_URL}: {exc}",
+                ) from exc
+
+            response_headers = _forward_headers(upstream_response.headers)
+            buffered = bytearray()
+
+            try:
+                async for chunk in upstream_response.aiter_raw():
+                    if chunk:
+                        buffered.extend(chunk)
+            except (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
+                await upstream_response.aclose()
+
+                if buffered:
+                    content_type = response_headers.get("content-type", "").lower()
+                    if "application/json" in content_type:
+                        try:
+                            json.loads(bytes(buffered))
+                            print(
+                                "[llm-proxy] Recovered valid non-streaming JSON from "
+                                f"partial upstream body after {type(exc).__name__}."
+                            )
+                            return Response(
+                                content=bytes(buffered),
+                                status_code=upstream_response.status_code,
+                                headers=response_headers,
+                            )
+                        except Exception:
+                            pass
+
+                if read_attempt + 1 < total_read_attempts:
+                    delay = _retry_delay_seconds(read_attempt)
+                    print(
+                        f"[llm-proxy] Non-stream read retry {read_attempt + 1}/{total_read_attempts - 1} "
+                        f"after {type(exc).__name__}: {exc} (sleep {delay:.2f}s)"
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                raise HTTPException(
+                    status_code=502,
+                    detail=f"Failed while reading non-streaming upstream response: {exc}",
+                ) from exc
+
+            await upstream_response.aclose()
+            return Response(
+                content=bytes(buffered),
+                status_code=upstream_response.status_code,
+                headers=response_headers,
+            )
+
+        raise HTTPException(
+            status_code=502,
+            detail="Failed while reading non-streaming upstream response after retries.",
+        )
+
     try:
         upstream_response = await _send_upstream_request(
             method=request.method,
@@ -187,25 +264,7 @@ async def proxy_to_llm(path: str, request: Request):
             detail=f"Failed to reach LLM backend at {LLM_BASE_URL}: {exc}",
         ) from exc
 
-    wants_streaming = _is_streaming_request(request, body)
     response_headers = _forward_headers(upstream_response.headers)
-
-    if PROXY_BUFFER_NON_STREAMING and not wants_streaming:
-        try:
-            buffered_body = await upstream_response.aread()
-        except (httpx.ReadError, httpx.ReadTimeout, httpx.RemoteProtocolError) as exc:
-            raise HTTPException(
-                status_code=502,
-                detail=f"Failed while reading non-streaming upstream response: {exc}",
-            ) from exc
-        finally:
-            await upstream_response.aclose()
-
-        return Response(
-            content=buffered_body,
-            status_code=upstream_response.status_code,
-            headers=response_headers,
-        )
 
     async def upstream_body():
         try:
