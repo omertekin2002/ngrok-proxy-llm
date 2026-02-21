@@ -77,6 +77,7 @@ Common optional values:
 - `PROXY_RETRY_BACKOFF_SECONDS=0.35`
 - `PROXY_RETRY_MAX_BACKOFF_SECONDS=2.0`
 - `PROXY_RETRY_METHODS=GET,HEAD,POST`
+- `PROXY_BUFFER_NON_STREAMING=true`
 
 ### Idle unload (memory saver)
 To automatically release model memory after inactivity, set:
@@ -107,6 +108,9 @@ PROXY_RETRY_METHODS=GET,HEAD,POST
 Note: Retrying `POST` can repeat a request if the upstream partially processed the first attempt.
 
 `make run-llm` uses the same retry policy via a dedicated local LLM proxy before ngrok.
+
+For non-streaming calls (`stream=false`), the proxy buffers the full upstream body before returning it.
+This avoids many intermittent `Upstream stream interrupted (ReadError)` logs caused by mid-stream disconnects.
 
 ## Smoke tests
 ### LLM
