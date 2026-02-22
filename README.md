@@ -63,6 +63,10 @@ Common optional values:
 - `STT_PORT=8320`
 - `NGROK_REGION=us`
 - `NGROK_DOMAIN=your-subdomain.ngrok.app`
+- `NGROK_RECONNECT_CHECK_SECONDS=15`
+- `NGROK_RECONNECT_FAILURE_THRESHOLD=2`
+- `NGROK_RECONNECT_MAX_ATTEMPTS=0`
+- `NGROK_RECONNECT_INITIAL_BACKOFF_SECONDS=1.0`
 - `HF_TOKEN=hf_xxx` (only needed for private/gated HF assets)
 - `STT_BACKEND=mlx`
 - `WHISPER_MODEL=mlx-community/whisper-large-v3-turbo`
@@ -136,6 +140,9 @@ curl -X POST https://YOUR_PUBLIC_URL/v1/audio/transcriptions \
   - `curl http://localhost:8317/v1/models`
 - To force CPU fallback: set `STT_BACKEND=faster-whisper` in `.env`
 - To disable idle unload: set `STT_IDLE_UNLOAD_SECONDS=0`
+- If ngrok drops after idle/Wi-Fi changes, keep auto-reconnect enabled (default) and tune:
+  - `NGROK_RECONNECT_CHECK_SECONDS`
+  - `NGROK_RECONNECT_FAILURE_THRESHOLD`
 
 ## Stop
 Press `Ctrl+C` in the running `make run` terminal.
