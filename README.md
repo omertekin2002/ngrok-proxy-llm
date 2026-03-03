@@ -81,6 +81,8 @@ Common optional values:
 - `PROXY_RETRY_BACKOFF_SECONDS=0.35`
 - `PROXY_RETRY_MAX_BACKOFF_SECONDS=2.0`
 - `PROXY_RETRY_METHODS=GET,HEAD,POST`
+- `PROXY_RETRY_ON_429=false`
+- `PROXY_RETRY_429_MAX_DELAY_SECONDS=30`
 - `PROXY_BUFFER_NON_STREAMING=true`
 - `PROXY_NONSTREAM_READ_RETRY_ATTEMPTS=1`
 
@@ -111,6 +113,17 @@ PROXY_RETRY_METHODS=GET,HEAD,POST
 ```
 
 Note: Retrying `POST` can repeat a request if the upstream partially processed the first attempt.
+
+By default, `429 Too Many Requests` is **not** retried.
+To enable optional 429 retry with bounded `Retry-After` support:
+
+```env
+PROXY_RETRY_ON_429=true
+PROXY_RETRY_429_MAX_DELAY_SECONDS=30
+```
+
+When enabled, if upstream sends `Retry-After`, the proxy uses it (seconds or HTTP-date),
+capped by `PROXY_RETRY_429_MAX_DELAY_SECONDS`. Otherwise it falls back to exponential backoff.
 
 `make run-llm` uses the same retry policy via a dedicated local LLM proxy before ngrok.
 

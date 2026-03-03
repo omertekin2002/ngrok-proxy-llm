@@ -16,7 +16,9 @@ import threading
 import gc
 import asyncio
 import json
+from datetime import datetime, timezone
 from contextlib import contextmanager
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -55,6 +57,17 @@ PROXY_RETRY_ATTEMPTS = int(os.getenv("PROXY_RETRY_ATTEMPTS", "2"))
 PROXY_RETRY_BACKOFF_SECONDS = float(os.getenv("PROXY_RETRY_BACKOFF_SECONDS", "0.35"))
 PROXY_RETRY_MAX_BACKOFF_SECONDS = float(os.getenv("PROXY_RETRY_MAX_BACKOFF_SECONDS", "2.0"))
 PROXY_RETRYABLE_STATUS_CODES = {502, 503, 504}
+PROXY_RETRY_ON_429 = os.getenv("PROXY_RETRY_ON_429", "false").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
+PROXY_RETRY_429_MAX_DELAY_SECONDS = float(
+    os.getenv("PROXY_RETRY_429_MAX_DELAY_SECONDS", "30.0")
+)
+if PROXY_RETRY_ON_429:
+    PROXY_RETRYABLE_STATUS_CODES.add(429)
 PROXY_RETRYABLE_METHODS = {
     method.strip().upper()
     for method in os.getenv("PROXY_RETRY_METHODS", "GET,HEAD,POST").split(",")
@@ -326,6 +339,9 @@ def health() -> Dict[str, Any]:
         "idle_seconds": idle_for,
         "idle_unload_seconds": STT_IDLE_UNLOAD_SECONDS,
         "llm_base_url": LLM_BASE_URL,
+        "proxy_retry_status_codes": sorted(PROXY_RETRYABLE_STATUS_CODES),
+        "proxy_retry_on_429": PROXY_RETRY_ON_429,
+        "proxy_retry_429_max_delay_seconds": PROXY_RETRY_429_MAX_DELAY_SECONDS,
     }
 
 
@@ -525,6 +541,39 @@ def _retry_delay_seconds(attempt_index: int) -> float:
     return min(PROXY_RETRY_MAX_BACKOFF_SECONDS, delay)
 
 
+def _parse_retry_after_seconds(retry_after: str) -> Optional[float]:
+    value = retry_after.strip()
+    if not value:
+        return None
+
+    try:
+        return max(0.0, float(value))
+    except ValueError:
+        pass
+
+    try:
+        parsed = parsedate_to_datetime(value)
+    except Exception:
+        return None
+
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    now = datetime.now(timezone.utc)
+    return max(0.0, (parsed - now).total_seconds())
+
+
+def _retry_delay_for_status(attempt_index: int, status_code: int, headers: Any) -> float:
+    delay = _retry_delay_seconds(attempt_index)
+    if status_code != 429 or not PROXY_RETRY_ON_429:
+        return delay
+
+    retry_after_seconds = _parse_retry_after_seconds(headers.get("retry-after", ""))
+    if retry_after_seconds is None:
+        return delay
+
+    return min(PROXY_RETRY_429_MAX_DELAY_SECONDS, retry_after_seconds)
+
+
 def _retry_enabled_for_method(method: str) -> bool:
     return method.upper() in PROXY_RETRYABLE_METHODS and PROXY_RETRY_ATTEMPTS > 0
 
@@ -598,12 +647,19 @@ async def _send_upstream_request(
                 and upstream_response.status_code in PROXY_RETRYABLE_STATUS_CODES
                 and attempt + 1 < total_attempts
             ):
-                delay = _retry_delay_seconds(attempt)
                 status = upstream_response.status_code
+                delay = _retry_delay_for_status(
+                    attempt_index=attempt,
+                    status_code=status,
+                    headers=upstream_response.headers,
+                )
+                retry_after = upstream_response.headers.get("retry-after")
                 await upstream_response.aclose()
                 print(
                     f"[proxy] {method} retry {attempt + 1}/{total_attempts - 1} "
-                    f"after upstream status {status} (sleep {delay:.2f}s)"
+                    f"after upstream status {status}"
+                    f"{f' retry-after={retry_after}' if retry_after else ''} "
+                    f"(sleep {delay:.2f}s)"
                 )
                 await asyncio.sleep(delay)
                 continue
