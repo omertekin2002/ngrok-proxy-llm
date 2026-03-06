@@ -4,7 +4,7 @@ LLM_LOCAL_URL ?= http://localhost:8317
 LLM_PROXY_PORT ?= 8330
 STT_PORT ?= 8320
 
-.PHONY: setup run help run-llm run-llm-direct stt-setup stt-run stt-tunnel
+.PHONY: setup run help run-llm run-llm-direct stt-setup stt-run stt-tunnel check-models probe-model
 
 help:
 	@echo "Available targets:"
@@ -15,6 +15,8 @@ help:
 	@echo "  make stt-setup   - install STT dependencies"
 	@echo "  make stt-run     - run local Whisper STT API on port $(STT_PORT)"
 	@echo "  make stt-tunnel  - expose local STT API via ngrok"
+	@echo "  make check-models - list models on local, proxy, and public endpoints"
+	@echo "  make probe-model MODEL=... PROMPT='...' - probe one model via chat completions"
 
 setup:
 	@test -d .venv || python3 -m venv .venv
@@ -41,3 +43,10 @@ stt-run:
 
 stt-tunnel:
 	@. .venv/bin/activate && python run.py --local-url http://localhost:$(STT_PORT) --health-path /health
+
+check-models:
+	@./scripts/check_models.sh
+
+probe-model:
+	@test -n "$(MODEL)" || (echo "Set MODEL=..." && exit 1)
+	@./scripts/probe_model.sh "$(MODEL)" "$(PROMPT)"
