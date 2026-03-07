@@ -4,7 +4,7 @@ LLM_LOCAL_URL ?= http://localhost:8317
 LLM_PROXY_PORT ?= 8330
 STT_PORT ?= 8320
 
-.PHONY: setup run help run-llm run-llm-direct stt-setup stt-run stt-tunnel check-models probe-model
+.PHONY: setup run help run-llm run-llm-direct run-codex run-gemini run-cli stt-setup stt-run stt-tunnel check-models probe-model
 
 help:
 	@echo "Available targets:"
@@ -12,6 +12,9 @@ help:
 	@echo "  make run        - one ngrok URL for both LLM + STT"
 	@echo "  make run-llm    - LLM-only mode via local retry proxy + ngrok"
 	@echo "  make run-llm-direct - tunnel LLM endpoint directly (no retry proxy)"
+	@echo "  make run-codex  - expose local Codex CLI bridge via ngrok"
+	@echo "  make run-gemini - expose local Gemini CLI bridge via ngrok"
+	@echo "  make run-cli    - expose a combined Codex + Gemini CLI bridge via ngrok"
 	@echo "  make stt-setup   - install STT dependencies"
 	@echo "  make stt-run     - run local Whisper STT API on port $(STT_PORT)"
 	@echo "  make stt-tunnel  - expose local STT API via ngrok"
@@ -32,6 +35,15 @@ run-llm:
 
 run-llm-direct:
 	@. .venv/bin/activate && python run.py --local-url $(LLM_LOCAL_URL)
+
+run-codex:
+	@. .venv/bin/activate && python run_codex_pipeline.py
+
+run-gemini:
+	@. .venv/bin/activate && python run_cli_pipeline.py --providers gemini
+
+run-cli:
+	@. .venv/bin/activate && python run_cli_pipeline.py --providers codex,gemini
 
 stt-setup:
 	@test -d .venv || python3 -m venv .venv

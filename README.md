@@ -5,6 +5,9 @@ Expose local AI services through ngrok.
 This repo now supports a **single ngrok URL** for:
 - existing local LLM API (proxied from `http://localhost:8317` by default)
 - local Whisper STT endpoints (`/v1/audio/transcriptions`, `/v1/audio/translations`)
+- an optional separate **Codex CLI bridge mode** exposed via its own ngrok URL
+- an optional **Gemini CLI bridge mode**
+- an optional combined **Codex + Gemini CLI bridge mode**
 
 On Apple Silicon, STT defaults to the **MLX backend** (GPU/NPU path) instead of CPU-only `faster-whisper`.
 
@@ -30,6 +33,21 @@ Run unified pipeline:
 make run
 ```
 
+Run Codex bridge mode:
+```bash
+make run-codex
+```
+
+Run Gemini bridge mode:
+```bash
+make run-gemini
+```
+
+Run combined Codex + Gemini bridge mode:
+```bash
+make run-cli
+```
+
 What `make run` does:
 1. Starts local STT service on `http://localhost:8320`
 2. Serves Whisper endpoints locally at `/v1/audio/*`
@@ -49,6 +67,9 @@ If ngrok prints `https://example.ngrok-free.dev`, you can use:
 - `make run`: unified mode, one ngrok URL for both LLM + STT
 - `make run-llm`: LLM-only mode via retry proxy + ngrok
 - `make run-llm-direct`: direct LLM tunnel (no retry proxy)
+- `make run-codex`: Codex CLI bridge via ngrok
+- `make run-gemini`: Gemini CLI bridge via ngrok
+- `make run-cli`: combined Codex + Gemini CLI bridge via ngrok
 - `make stt-setup`: install STT dependencies
 - `make stt-run`: run only local STT service on port `8320`
 - `make stt-tunnel`: tunnel only STT service
@@ -61,6 +82,8 @@ Common optional values:
 - `LLM_LOCAL_URL=http://localhost:8317`
 - `LLM_PROXY_PORT=8330`
 - `STT_PORT=8320`
+- `CODEX_BRIDGE_PORT=8340`
+- `CLI_BRIDGE_PORT=8350`
 - `NGROK_REGION=us`
 - `NGROK_DOMAIN=your-subdomain.ngrok.app`
 - `NGROK_RECONNECT_CHECK_SECONDS=15`
@@ -85,6 +108,90 @@ Common optional values:
 - `PROXY_RETRY_429_MAX_DELAY_SECONDS=30`
 - `PROXY_BUFFER_NON_STREAMING=true`
 - `PROXY_NONSTREAM_READ_RETRY_ATTEMPTS=1`
+
+### Codex bridge mode
+`make run-codex` starts a small FastAPI bridge that runs `codex exec` per request, then exposes that bridge through ngrok.
+
+Local bridge defaults:
+- `http://localhost:8340/health`
+- `http://localhost:8340/v1/models`
+- `http://localhost:8340/v1/chat/completions`
+- `http://localhost:8340/v1/responses`
+
+Important behavior:
+- Existing `make run` and `make run-llm` behavior is unchanged.
+- Codex requests are serialized by default with `CODEX_MAX_CONCURRENCY=1`.
+- The bridge defaults to `CODEX_SANDBOX=read-only`.
+- `stream=true` is not supported yet; requests are buffered until `codex exec` finishes.
+- The bridge does not expose raw provider subscriptions. It shells out to your local Codex CLI session.
+
+Recommended Codex env values:
+```env
+CODEX_BRIDGE_AUTH_TOKEN=change_me
+CODEX_WORKDIR=/absolute/path/to/workdir
+CODEX_SANDBOX=read-only
+CODEX_MAX_CONCURRENCY=1
+CODEX_REQUEST_TIMEOUT_SECONDS=900
+```
+
+Codex prerequisites:
+- `codex` CLI installed and available on `PATH`
+- Codex authenticated locally (`codex login` or equivalent existing session)
+
+Example request:
+```bash
+curl https://YOUR_PUBLIC_URL/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "codex-cli",
+    "messages": [
+      {"role": "user", "content": "Reply with exactly ok"}
+    ]
+  }'
+```
+
+### Gemini and combined CLI bridge modes
+`make run-gemini` starts a Gemini-only bridge. `make run-cli` starts a combined bridge that can route requests to either Codex CLI or Gemini CLI behind one ngrok URL.
+
+Combined bridge defaults:
+- `http://localhost:8350/health`
+- `http://localhost:8350/v1/models`
+- `http://localhost:8350/v1/chat/completions`
+- `http://localhost:8350/v1/responses`
+
+Model routing:
+- `model: "codex-cli"` routes to Codex CLI
+- `model: "gemini-cli"` routes to Gemini CLI
+- configured `CODEX_MODEL` and `GEMINI_MODEL` are also advertised when set
+- in combined mode, `gemini-*` model names route to Gemini; `o*`, `gpt*`, and `codex*` names route to Codex
+
+Recommended env values:
+```env
+CLI_BRIDGE_AUTH_TOKEN=change_me
+CLI_BRIDGE_DEFAULT_PROVIDER=codex
+GEMINI_SANDBOX=true
+GEMINI_APPROVAL_MODE=default
+GEMINI_MAX_CONCURRENCY=1
+GEMINI_REQUEST_TIMEOUT_SECONDS=900
+```
+
+Gemini prerequisites:
+- `gemini` CLI installed and available on `PATH`
+- Gemini authenticated locally
+
+Example Gemini request:
+```bash
+curl https://YOUR_PUBLIC_URL/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "gemini-cli",
+    "messages": [
+      {"role": "user", "content": "Reply with exactly ok"}
+    ]
+  }'
+```
 
 ### Idle unload (memory saver)
 To automatically release model memory after inactivity, set:
