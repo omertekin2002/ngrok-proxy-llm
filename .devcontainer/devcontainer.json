@@ -6,6 +6,12 @@
       "version": "lts"
     }
   },
+  "secrets": {
+    "NGROK_AUTH_TOKEN": {
+      "description": "ngrok auth token used to open public tunnels from the Codespace.",
+      "documentationUrl": "https://dashboard.ngrok.com/get-started/your-authtoken"
+    }
+  },
   "customizations": {
     "vscode": {
       "settings": {
