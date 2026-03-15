@@ -152,6 +152,33 @@ def _usage_from_tokens(input_tokens: int, output_tokens: int) -> Dict[str, int]:
     }
 
 
+def _parse_json_object_from_text(text: str) -> Dict[str, Any]:
+    stripped = text.strip()
+    if not stripped:
+        raise RuntimeError("Gemini CLI returned empty output.")
+
+    try:
+        payload = json.loads(stripped)
+    except json.JSONDecodeError:
+        payload = None
+
+    if isinstance(payload, dict):
+        return payload
+
+    decoder = json.JSONDecoder()
+    for index, char in enumerate(stripped):
+        if char != "{":
+            continue
+        try:
+            candidate, end_index = decoder.raw_decode(stripped[index:])
+        except json.JSONDecodeError:
+            continue
+        if isinstance(candidate, dict) and not stripped[index + end_index :].strip():
+            return candidate
+
+    raise RuntimeError(f"Failed to parse Gemini JSON output: {stripped[:400]}")
+
+
 async def _read_lines(stream: asyncio.StreamReader) -> List[str]:
     lines: List[str] = []
     while True:
@@ -401,7 +428,8 @@ class CodexBackend(CliBackend):
 class GeminiBackend(CliBackend):
     def __init__(self) -> None:
         repo_dir = Path(__file__).resolve().parent
-        self.approval_mode = os.getenv("GEMINI_APPROVAL_MODE", "default").strip() or "default"
+        approval_mode = os.getenv("GEMINI_APPROVAL_MODE")
+        self.approval_mode = approval_mode.strip() if approval_mode and approval_mode.strip() else None
         self.sandbox = _parse_bool(os.getenv("GEMINI_SANDBOX"), True)
         self.include_directories = _split_csv(os.getenv("GEMINI_INCLUDE_DIRECTORIES", ""))
         self.extensions = _split_csv(os.getenv("GEMINI_EXTENSIONS", ""))
@@ -443,11 +471,12 @@ class GeminiBackend(CliBackend):
             self.binary,
             "--output-format",
             "json",
-            "--approval-mode",
-            self.approval_mode,
             "-p",
             "",
         ]
+
+        if self.approval_mode:
+            command.extend(["--approval-mode", self.approval_mode])
 
         if self.sandbox:
             command.append("--sandbox")
@@ -504,13 +533,7 @@ class GeminiBackend(CliBackend):
         if return_code != 0:
             raise RuntimeError(stderr_text or stdout_text or "Gemini CLI exited with a non-zero status.")
 
-        try:
-            payload = json.loads(stdout_text)
-        except json.JSONDecodeError as exc:
-            raise RuntimeError(f"Failed to parse Gemini JSON output: {stdout_text[:400]}") from exc
-
-        if not isinstance(payload, dict):
-            raise RuntimeError("Gemini CLI returned unexpected output.")
+        payload = _parse_json_object_from_text(stdout_text)
 
         response_text = str(payload.get("response", "")).strip()
         stats = payload.get("stats") or {}

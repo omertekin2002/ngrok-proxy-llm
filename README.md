@@ -171,10 +171,11 @@ Recommended env values:
 CLI_BRIDGE_AUTH_TOKEN=change_me
 CLI_BRIDGE_DEFAULT_PROVIDER=codex
 GEMINI_SANDBOX=true
-GEMINI_APPROVAL_MODE=default
 GEMINI_MAX_CONCURRENCY=1
 GEMINI_REQUEST_TIMEOUT_SECONDS=900
 ```
+
+`GEMINI_APPROVAL_MODE` is optional. Leave it unset to use your local Gemini CLI approval configuration.
 
 Gemini prerequisites:
 - `gemini` CLI installed and available on `PATH`
