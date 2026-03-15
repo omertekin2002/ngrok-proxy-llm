@@ -52,6 +52,7 @@ The included devcontainer:
 - uses Python 3.11
 - installs Node.js LTS to make CLI installation easier
 - creates `.venv` and installs `requirements.txt`
+- installs `@openai/codex` and `@google/gemini-cli`
 - forwards ports `8330`, `8340`, and `8350`
 
 After the Codespace is created:
@@ -66,8 +67,14 @@ CLI_BRIDGE_AUTH_TOKEN=choose_a_long_random_secret
 ```
 
 Then install and authenticate the provider CLIs inside the Codespace itself:
-- `codex`
-- `gemini`
+- `codex` is installed automatically by the post-create script
+- `gemini` is installed automatically by the post-create script
+
+You still need to authenticate them after the Codespace starts:
+```bash
+codex
+gemini
+```
 
 Once those are available on `PATH`, you can run:
 ```bash
