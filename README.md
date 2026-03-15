@@ -45,6 +45,40 @@ Run combined Codex + Gemini bridge mode:
 make run-cli
 ```
 
+## Codespaces
+This repo can run in GitHub Codespaces now.
+
+The included devcontainer:
+- uses Python 3.11
+- installs Node.js LTS to make CLI installation easier
+- creates `.venv` and installs `requirements.txt`
+- forwards ports `8330`, `8340`, and `8350`
+
+After the Codespace is created:
+```bash
+cp .env.example .env  # only if .env was not created already
+```
+
+Set at least:
+```env
+NGROK_AUTH_TOKEN=your_real_ngrok_token_here
+CLI_BRIDGE_AUTH_TOKEN=choose_a_long_random_secret
+```
+
+Then install and authenticate the provider CLIs inside the Codespace itself:
+- `codex`
+- `gemini`
+
+Once those are available on `PATH`, you can run:
+```bash
+make run-cli
+```
+
+Notes:
+- In a Codespace, `localhost` means the Codespace VM, not your laptop
+- If you only need private access, Codespaces port forwarding can replace ngrok for `8350`
+- If you use `make run`, your LLM backend also needs to run inside the Codespace
+
 ## What `make run` does
 1. Starts a local retrying proxy in front of your LLM backend
 2. Exposes that proxy through one ngrok URL
