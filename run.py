@@ -4,6 +4,7 @@ import os
 import signal
 import sys
 import time
+from typing import List, Optional
 from urllib.parse import urlparse
 
 import httpx
@@ -103,6 +104,66 @@ def tunnel_target(local_url: str) -> str:
     return parsed.netloc
 
 
+def normalize_public_url(url_or_domain: str) -> str:
+    if "://" not in url_or_domain:
+        url_or_domain = f"https://{url_or_domain}"
+    return url_or_domain.rstrip("/")
+
+
+def is_endpoint_conflict_error(exc: Exception) -> bool:
+    return "ERR_NGROK_334" in str(exc)
+
+
+def find_conflicting_tunnels(target: str, domain: Optional[str]) -> List:
+    expected_addrs = {
+        target,
+        f"http://{target}",
+        f"https://{target}",
+    }
+    expected_public_url = normalize_public_url(domain) if domain else None
+
+    matches = []
+    for tunnel in ngrok.get_tunnels():
+        tunnel_addr = tunnel.config.get("addr", "").rstrip("/")
+        tunnel_public_url = (tunnel.public_url or "").rstrip("/")
+
+        if tunnel_addr in expected_addrs:
+            matches.append(tunnel)
+            continue
+
+        if expected_public_url and tunnel_public_url == expected_public_url:
+            matches.append(tunnel)
+
+    return matches
+
+
+def cleanup_conflicting_tunnels(target: str, domain: Optional[str]) -> bool:
+    try:
+        conflicting_tunnels = find_conflicting_tunnels(target, domain)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[ngrok] failed to inspect local tunnels during conflict cleanup: {exc}")
+        conflicting_tunnels = []
+
+    disconnected_any = False
+    for tunnel in conflicting_tunnels:
+        public_url = tunnel.public_url
+        if not public_url:
+            continue
+        print(f"[ngrok] disconnecting stale local tunnel: {public_url}")
+        ngrok.disconnect(public_url)
+        disconnected_any = True
+
+    if disconnected_any:
+        return True
+
+    print(
+        "[ngrok] endpoint conflict detected but no matching local tunnel was listed. "
+        "Restarting the local ngrok agent and retrying..."
+    )
+    ngrok.kill()
+    return True
+
+
 def connect_tunnel(
     *,
     target: str,
@@ -116,6 +177,11 @@ def connect_tunnel(
         try:
             return ngrok.connect(addr=target, proto="http", bind_tls=True, **options)
         except Exception as exc:
+            if is_endpoint_conflict_error(exc):
+                if cleanup_conflicting_tunnels(target, options.get("domain")):
+                    time.sleep(1)
+                    continue
+
             if max_attempts > 0 and attempt >= max_attempts:
                 raise RuntimeError(
                     f"Failed to connect ngrok tunnel after {attempt} attempts: {exc}"
