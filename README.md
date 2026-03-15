@@ -1,22 +1,19 @@
 # ngrok-proxy-llm
 
-Expose local AI services through ngrok.
+Expose local AI endpoints through ngrok.
 
-This repo now supports a **single ngrok URL** for:
-- existing local LLM API (proxied from `http://localhost:8317` by default)
-- local Whisper STT endpoints (`/v1/audio/transcriptions`, `/v1/audio/translations`)
-- an optional separate **Codex CLI bridge mode** exposed via its own ngrok URL
-- an optional **Gemini CLI bridge mode**
-- an optional combined **Codex + Gemini CLI bridge mode**
-
-On Apple Silicon, STT defaults to the **MLX backend** (GPU/NPU path) instead of CPU-only `faster-whisper`.
+This repo supports:
+- an existing local LLM API proxied from `http://localhost:8317` by default
+- an optional Codex CLI bridge exposed through its own ngrok URL
+- an optional Gemini CLI bridge
+- an optional combined Codex + Gemini CLI bridge
 
 ## Prerequisites
 - Python 3.9+
 - ngrok account + auth token
-- Local LLM API already running (default: `http://localhost:8317`)
+- Local LLM API already running for `make run`, `make run-llm`, or `make run-llm-direct`
 
-## Quick Start (single URL for LLM + STT)
+## Quick start
 ```bash
 git clone https://github.com/omertekin2002/ngrok-proxy-llm.git
 cd ngrok-proxy-llm
@@ -28,7 +25,7 @@ Edit `.env` and set at least:
 NGROK_AUTH_TOKEN=your_real_ngrok_token_here
 ```
 
-Run unified pipeline:
+Run the default LLM proxy pipeline:
 ```bash
 make run
 ```
@@ -48,40 +45,31 @@ Run combined Codex + Gemini bridge mode:
 make run-cli
 ```
 
-What `make run` does:
-1. Starts local STT service on `http://localhost:8320`
-2. Serves Whisper endpoints locally at `/v1/audio/*`
-3. Proxies all non-audio requests to your LLM backend (`LLM_LOCAL_URL`)
-4. Opens one ngrok tunnel to that unified local service
+## What `make run` does
+1. Starts a local retrying proxy in front of your LLM backend
+2. Exposes that proxy through one ngrok URL
 
-## Endpoints on the same public URL
-If ngrok prints `https://example.ngrok-free.dev`, you can use:
+If ngrok prints `https://example.ngrok-free.dev`, likely endpoints are:
 - `https://example.ngrok-free.dev/v1/models`
 - `https://example.ngrok-free.dev/v1/chat/completions`
 - `https://example.ngrok-free.dev/v1/responses`
-- `https://example.ngrok-free.dev/v1/audio/transcriptions`
-- `https://example.ngrok-free.dev/v1/audio/translations`
 
 ## Make targets
-- `make setup`: install full dependencies and create `.env` if missing
-- `make run`: unified mode, one ngrok URL for both LLM + STT
-- `make run-llm`: LLM-only mode via retry proxy + ngrok
-- `make run-llm-direct`: direct LLM tunnel (no retry proxy)
+- `make setup`: install dependencies and create `.env` if missing
+- `make run`: default LLM retry proxy + ngrok
+- `make run-llm`: same as `make run`
+- `make run-llm-direct`: direct LLM tunnel without the retry proxy
 - `make run-codex`: Codex CLI bridge via ngrok
 - `make run-gemini`: Gemini CLI bridge via ngrok
 - `make run-cli`: combined Codex + Gemini CLI bridge via ngrok
-- `make stt-setup`: install STT dependencies
-- `make stt-run`: run only local STT service on port `8320`
-- `make stt-tunnel`: tunnel only STT service
 
-## Configuration (.env)
+## Configuration
 Required:
 - `NGROK_AUTH_TOKEN=...`
 
 Common optional values:
 - `LLM_LOCAL_URL=http://localhost:8317`
 - `LLM_PROXY_PORT=8330`
-- `STT_PORT=8320`
 - `CODEX_BRIDGE_PORT=8340`
 - `CLI_BRIDGE_PORT=8350`
 - `NGROK_REGION=us`
@@ -90,16 +78,6 @@ Common optional values:
 - `NGROK_RECONNECT_FAILURE_THRESHOLD=2`
 - `NGROK_RECONNECT_MAX_ATTEMPTS=0`
 - `NGROK_RECONNECT_INITIAL_BACKOFF_SECONDS=1.0`
-- `HF_TOKEN=hf_xxx` (only needed for private/gated HF assets)
-- `STT_BACKEND=mlx`
-- `WHISPER_MODEL=mlx-community/whisper-large-v3-turbo`
-- `MLX_FP16=true`
-- `WHISPER_MODEL=large-v3` (if `STT_BACKEND=faster-whisper`)
-- `WHISPER_DEVICE=auto`
-- `WHISPER_COMPUTE_TYPE=int8`
-- `STT_EAGER_LOAD=true`
-- `STT_IDLE_UNLOAD_SECONDS=900`
-- `STT_IDLE_CHECK_SECONDS=15`
 - `PROXY_RETRY_ATTEMPTS=2`
 - `PROXY_RETRY_BACKOFF_SECONDS=0.35`
 - `PROXY_RETRY_MAX_BACKOFF_SECONDS=2.0`
@@ -110,7 +88,7 @@ Common optional values:
 - `PROXY_NONSTREAM_READ_RETRY_ATTEMPTS=1`
 
 ### Codex bridge mode
-`make run-codex` starts a small FastAPI bridge that runs `codex exec` per request, then exposes that bridge through ngrok.
+`make run-codex` starts a FastAPI bridge that runs `codex exec` per request, then exposes that bridge through ngrok.
 
 Local bridge defaults:
 - `http://localhost:8340/health`
@@ -119,11 +97,10 @@ Local bridge defaults:
 - `http://localhost:8340/v1/responses`
 
 Important behavior:
-- Existing `make run` and `make run-llm` behavior is unchanged.
-- Codex requests are serialized by default with `CODEX_MAX_CONCURRENCY=1`.
-- The bridge defaults to `CODEX_SANDBOX=read-only`.
-- `stream=true` is not supported yet; requests are buffered until `codex exec` finishes.
-- The bridge does not expose raw provider subscriptions. It shells out to your local Codex CLI session.
+- Codex requests are serialized by default with `CODEX_MAX_CONCURRENCY=1`
+- The bridge defaults to `CODEX_SANDBOX=read-only`
+- `stream=true` is not supported yet; requests are buffered until `codex exec` finishes
+- The bridge shells out to your local Codex CLI session
 
 Recommended Codex env values:
 ```env
@@ -136,7 +113,7 @@ CODEX_REQUEST_TIMEOUT_SECONDS=900
 
 Codex prerequisites:
 - `codex` CLI installed and available on `PATH`
-- Codex authenticated locally (`codex login` or equivalent existing session)
+- Codex authenticated locally
 
 Example request:
 ```bash
@@ -175,8 +152,6 @@ GEMINI_MAX_CONCURRENCY=1
 GEMINI_REQUEST_TIMEOUT_SECONDS=900
 ```
 
-`GEMINI_APPROVAL_MODE` is optional. Leave it unset to use your local Gemini CLI approval configuration.
-
 Gemini prerequisites:
 - `gemini` CLI installed and available on `PATH`
 - Gemini authenticated locally
@@ -194,76 +169,38 @@ curl https://YOUR_PUBLIC_URL/v1/chat/completions \
   }'
 ```
 
-### Idle unload (memory saver)
-To automatically release model memory after inactivity, set:
-
-```env
-STT_IDLE_UNLOAD_SECONDS=600
-```
-
-Behavior:
-- Model unloads after the configured idle period.
-- Next transcription request auto-loads the model again.
-- Check current state at `GET /health` (`model_loaded`, `idle_seconds`).
-
 ### LLM proxy retries
 For transient upstream hiccups, proxy calls retry automatically with exponential backoff.
 
-Default retry methods are:
+Default retry methods:
 - `GET`
 - `HEAD`
 - `POST`
 
 To customize:
-
 ```env
 PROXY_RETRY_METHODS=GET,HEAD,POST
 ```
 
-Note: Retrying `POST` can repeat a request if the upstream partially processed the first attempt.
+Retrying `POST` can repeat a request if the upstream partially processed the first attempt.
 
-By default, `429 Too Many Requests` is **not** retried.
-To enable optional 429 retry with bounded `Retry-After` support:
-
+By default, `429 Too Many Requests` is not retried. To enable bounded `Retry-After` support:
 ```env
 PROXY_RETRY_ON_429=true
 PROXY_RETRY_429_MAX_DELAY_SECONDS=30
 ```
 
-When enabled, if upstream sends `Retry-After`, the proxy uses it (seconds or HTTP-date),
-capped by `PROXY_RETRY_429_MAX_DELAY_SECONDS`. Otherwise it falls back to exponential backoff.
+For non-streaming calls (`stream=false`), the proxy buffers the full upstream body before returning it. If the body read fails after headers, the proxy can retry the full request using `PROXY_NONSTREAM_READ_RETRY_ATTEMPTS`.
 
-`make run-llm` uses the same retry policy via a dedicated local LLM proxy before ngrok.
-
-For non-streaming calls (`stream=false`), the proxy buffers the full upstream body before returning it.
-This avoids many intermittent `Upstream stream interrupted (ReadError)` logs caused by mid-stream disconnects.
-If the body read still fails after headers, the proxy can retry the full request using
-`PROXY_NONSTREAM_READ_RETRY_ATTEMPTS`.
-
-## Smoke tests
-### LLM
+## Smoke test
 ```bash
 curl https://YOUR_PUBLIC_URL/v1/models
 ```
 
-### STT
-```bash
-curl -X POST https://YOUR_PUBLIC_URL/v1/audio/transcriptions \
-  -F "file=@/absolute/path/to/audio.m4a" \
-  -F "model=whisper-1"
-```
-
 ## Troubleshooting
-- `Missing NGROK_AUTH_TOKEN`: set token in `.env`
-- STT takes long on first run: model download can take several minutes (MLX `large-v3-turbo` is multiple GB)
-- STT decode errors: install ffmpeg (`brew install ffmpeg`)
-- LLM calls failing in unified mode: verify local LLM first:
-  - `curl http://localhost:8317/v1/models`
-- To force CPU fallback: set `STT_BACKEND=faster-whisper` in `.env`
-- To disable idle unload: set `STT_IDLE_UNLOAD_SECONDS=0`
-- If ngrok drops after idle/Wi-Fi changes, keep auto-reconnect enabled (default) and tune:
-  - `NGROK_RECONNECT_CHECK_SECONDS`
-  - `NGROK_RECONNECT_FAILURE_THRESHOLD`
+- `Missing NGROK_AUTH_TOKEN`: set the token in `.env`
+- LLM calls failing: verify the local backend first with `curl http://localhost:8317/v1/models`
+- If ngrok drops after idle or network changes, keep auto-reconnect enabled and tune `NGROK_RECONNECT_CHECK_SECONDS` and `NGROK_RECONNECT_FAILURE_THRESHOLD`
 
 ## Stop
-Press `Ctrl+C` in the running `make run` terminal.
+Press `Ctrl+C` in the running terminal.

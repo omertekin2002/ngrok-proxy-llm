@@ -139,8 +139,6 @@ def print_tunnel_info(public_url: str, local_url: str) -> None:
     print(f"  {public_url}/v1/models")
     print(f"  {public_url}/v1/chat/completions")
     print(f"  {public_url}/v1/responses")
-    print(f"  {public_url}/v1/audio/transcriptions")
-    print(f"  {public_url}/v1/audio/translations")
     print(f"  {public_url}/docs")
     print("=" * 60)
 
