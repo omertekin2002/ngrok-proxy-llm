@@ -2,13 +2,16 @@ SHELL := /bin/zsh
 
 LLM_LOCAL_URL ?= http://localhost:8317
 LLM_PROXY_PORT ?= 8330
+CLI_BRIDGE_PORT ?= 8350
+CLI_BRIDGE_PROVIDERS ?= codex,gemini
 
-.PHONY: setup run help run-llm run-llm-direct run-codex run-gemini run-cli check-models probe-model
+.PHONY: setup run run-all help run-llm run-llm-direct run-codex run-gemini run-cli check-models probe-model
 
 help:
 	@echo "Available targets:"
 	@echo "  make setup      - create .venv, install deps, and create .env if missing"
-	@echo "  make run        - LLM retry proxy + ngrok"
+	@echo "  make run        - LLM retry proxy + CLI bridge + ngrok tunnels"
+	@echo "  make run-all    - same as make run"
 	@echo "  make run-llm    - LLM-only mode via local retry proxy + ngrok"
 	@echo "  make run-llm-direct - tunnel LLM endpoint directly (no retry proxy)"
 	@echo "  make run-codex  - expose local Codex CLI bridge via ngrok"
@@ -23,8 +26,10 @@ setup:
 	@test -f .env || cp .env.example .env
 	@echo "Setup complete. Edit .env and set NGROK_AUTH_TOKEN if needed."
 
-run:
-	@. .venv/bin/activate && python run_pipeline.py --llm-url $(LLM_LOCAL_URL) --proxy-port $(LLM_PROXY_PORT)
+run: run-all
+
+run-all:
+	@. .venv/bin/activate && python run_all_pipeline.py --llm-url $(LLM_LOCAL_URL) --llm-proxy-port $(LLM_PROXY_PORT) --cli-bridge-port $(CLI_BRIDGE_PORT) --providers $(CLI_BRIDGE_PROVIDERS)
 
 run-llm:
 	@. .venv/bin/activate && python run_llm_pipeline.py --llm-url $(LLM_LOCAL_URL) --proxy-port $(LLM_PROXY_PORT)

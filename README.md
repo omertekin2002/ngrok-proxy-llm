@@ -4,6 +4,7 @@ Expose local AI endpoints through ngrok.
 
 This repo supports:
 - an existing local LLM API proxied from `http://localhost:8317` by default
+- a default combined mode that exposes the LLM proxy and CLI bridge at the same time
 - an optional Codex CLI bridge exposed through its own ngrok URL
 - an optional Gemini CLI bridge
 - an optional combined Codex + Gemini CLI bridge
@@ -12,6 +13,7 @@ This repo supports:
 - Python 3.9+
 - ngrok account + auth token
 - Local LLM API already running for `make run`, `make run-llm`, or `make run-llm-direct`
+- Codex and Gemini CLIs installed/authenticated for the default `make run` combined bridge, unless you override `CLI_BRIDGE_PROVIDERS`
 
 ## Quick start
 ```bash
@@ -25,9 +27,14 @@ Edit `.env` and set at least:
 NGROK_AUTH_TOKEN=your_real_ngrok_token_here
 ```
 
-Run the default LLM proxy pipeline:
+Run the default combined LLM proxy + CLI bridge pipeline:
 ```bash
 make run
+```
+
+Run LLM-only mode:
+```bash
+make run-llm
 ```
 
 Run Codex bridge mode:
@@ -78,15 +85,38 @@ gemini
 
 Once those are available on `PATH`, you can run:
 ```bash
-make run-cli
+make run
 ```
 
 Notes:
 - In a Codespace, `localhost` means the Codespace VM, not your laptop
 - If you only need private access, Codespaces port forwarding can replace ngrok for `8350`
 - If you use `make run`, your LLM backend also needs to run inside the Codespace
+- If you only need the CLI bridge in Codespaces, use `make run-cli`
 
 ## What `make run` does
+1. Starts a local retrying proxy in front of your LLM backend
+2. Starts the combined Codex + Gemini CLI bridge
+3. Exposes each local service through its own ngrok URL
+
+If the LLM proxy tunnel prints `https://llm-example.ngrok-free.dev`, likely endpoints are:
+- `https://llm-example.ngrok-free.dev/v1/models`
+- `https://llm-example.ngrok-free.dev/v1/chat/completions`
+- `https://llm-example.ngrok-free.dev/v1/responses`
+
+If the CLI bridge tunnel prints `https://cli-example.ngrok-free.dev`, likely endpoints are:
+- `https://cli-example.ngrok-free.dev/v1/models`
+- `https://cli-example.ngrok-free.dev/v1/chat/completions`
+- `https://cli-example.ngrok-free.dev/v1/responses`
+
+If you set a reserved `NGROK_DOMAIN`, `make run` uses it for the LLM proxy. Set `CLI_NGROK_DOMAIN` separately if you also want a reserved domain for the CLI bridge.
+
+For LLM-only behavior, use:
+```bash
+make run-llm
+```
+
+## What `make run-llm` does
 1. Starts a local retrying proxy in front of your LLM backend
 2. Exposes that proxy through one ngrok URL
 
@@ -97,8 +127,9 @@ If ngrok prints `https://example.ngrok-free.dev`, likely endpoints are:
 
 ## Make targets
 - `make setup`: install dependencies and create `.env` if missing
-- `make run`: default LLM retry proxy + ngrok
-- `make run-llm`: same as `make run`
+- `make run`: default combined LLM retry proxy + CLI bridge + ngrok tunnels
+- `make run-all`: same as `make run`
+- `make run-llm`: LLM-only mode via local retry proxy + ngrok
 - `make run-llm-direct`: direct LLM tunnel without the retry proxy
 - `make run-codex`: Codex CLI bridge via ngrok
 - `make run-gemini`: Gemini CLI bridge via ngrok
@@ -113,8 +144,12 @@ Common optional values:
 - `LLM_PROXY_PORT=8330`
 - `CODEX_BRIDGE_PORT=8340`
 - `CLI_BRIDGE_PORT=8350`
+- `CLI_BRIDGE_PROVIDERS=codex,gemini`
 - `NGROK_REGION=us`
 - `NGROK_DOMAIN=your-subdomain.ngrok.app`
+- `LLM_NGROK_DOMAIN=your-llm-subdomain.ngrok.app`
+- `CLI_NGROK_DOMAIN=your-cli-subdomain.ngrok.app`
+- `RUN_ALL_STARTUP_TIMEOUT=120`
 - `NGROK_RECONNECT_CHECK_SECONDS=15`
 - `NGROK_RECONNECT_FAILURE_THRESHOLD=2`
 - `NGROK_RECONNECT_MAX_ATTEMPTS=0`
