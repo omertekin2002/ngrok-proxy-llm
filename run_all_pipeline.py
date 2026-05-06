@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the LLM retry proxy and CLI bridge, each exposed through ngrok."""
+"""Run the LLM retry proxy and CLI bridge behind one public router."""
 
 from __future__ import annotations
 
@@ -40,28 +40,11 @@ def _parse_bool(value: Optional[str], default: bool) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _normalize_domain(domain: Optional[str]) -> Optional[str]:
-    if not domain:
-        return None
-    normalized = domain.strip().rstrip("/")
-    if not normalized:
-        return None
-    if "://" in normalized:
-        normalized = normalized.split("://", 1)[1]
-    return normalized.lower()
-
-
-def _domains_conflict(left: Optional[str], right: Optional[str]) -> bool:
-    left_normalized = _normalize_domain(left)
-    right_normalized = _normalize_domain(right)
-    return bool(left_normalized and right_normalized and left_normalized == right_normalized)
-
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the LLM retry proxy and combined Codex/Gemini CLI bridge, "
-            "then expose both through ngrok."
+            "Run the LLM retry proxy and combined Codex/Gemini CLI bridge "
+            "behind one OpenAI-compatible router, then expose that router through ngrok."
         )
     )
     parser.add_argument(
@@ -82,6 +65,12 @@ def parse_args() -> argparse.Namespace:
         help="Port for local CLI bridge (default: 8350)",
     )
     parser.add_argument(
+        "--router-port",
+        type=int,
+        default=int(os.getenv("COMBINED_PROXY_PORT", "8360")),
+        help="Port for combined public router (default: 8360)",
+    )
+    parser.add_argument(
         "--providers",
         default=os.getenv("CLI_BRIDGE_PROVIDERS", "codex,gemini"),
         help="Comma-separated CLI providers to enable (default: codex,gemini)",
@@ -98,17 +87,12 @@ def parse_args() -> argparse.Namespace:
         help="ngrok region (us, eu, ap, au, sa, jp, in)",
     )
     parser.add_argument(
-        "--llm-domain",
-        default=os.getenv("LLM_NGROK_DOMAIN", os.getenv("NGROK_DOMAIN")),
+        "--domain",
+        default=os.getenv("COMBINED_NGROK_DOMAIN", os.getenv("NGROK_DOMAIN")),
         help=(
-            "Reserved ngrok domain for the LLM proxy. Defaults to "
-            "LLM_NGROK_DOMAIN, then NGROK_DOMAIN."
+            "Reserved ngrok domain for the combined public router. Defaults to "
+            "COMBINED_NGROK_DOMAIN, then NGROK_DOMAIN."
         ),
-    )
-    parser.add_argument(
-        "--cli-domain",
-        default=os.getenv("CLI_NGROK_DOMAIN"),
-        help="Reserved ngrok domain for the CLI bridge. Defaults to CLI_NGROK_DOMAIN.",
     )
     parser.add_argument(
         "--disable-auto-reconnect",
@@ -179,6 +163,7 @@ def terminate_process(process: ManagedProcess) -> None:
 def start_processes(args: argparse.Namespace, repo_dir: Path) -> List[ManagedProcess]:
     llm_proxy_url = f"http://localhost:{args.llm_proxy_port}"
     cli_bridge_url = f"http://localhost:{args.cli_bridge_port}"
+    router_url = f"http://localhost:{args.router_port}"
 
     llm_env = os.environ.copy()
     llm_env["LLM_BASE_URL"] = args.llm_url
@@ -206,6 +191,20 @@ def start_processes(args: argparse.Namespace, repo_dir: Path) -> List[ManagedPro
         str(args.cli_bridge_port),
     ]
 
+    router_env = os.environ.copy()
+    router_env["LLM_PROXY_URL"] = llm_proxy_url
+    router_env["CLI_BRIDGE_URL"] = cli_bridge_url
+    router_cmd = [
+        sys.executable,
+        "-m",
+        "uvicorn",
+        "combined_proxy:app",
+        "--host",
+        "0.0.0.0",
+        "--port",
+        str(args.router_port),
+    ]
+
     processes: List[ManagedProcess] = []
 
     try:
@@ -222,6 +221,14 @@ def start_processes(args: argparse.Namespace, repo_dir: Path) -> List[ManagedPro
         cli_proc = subprocess.Popen(cli_cmd, cwd=repo_dir, env=cli_env)
         processes.append(ManagedProcess("cli bridge", cli_proc))
         wait_for_health(f"{cli_bridge_url}/health", args.startup_timeout, cli_proc, "CLI bridge")
+
+        print("Starting combined public router server...")
+        print(f"  LLM proxy : {llm_proxy_url}")
+        print(f"  CLI bridge: {cli_bridge_url}")
+        print(f"  Router    : {router_url}")
+        router_proc = subprocess.Popen(router_cmd, cwd=repo_dir, env=router_env)
+        processes.append(ManagedProcess("combined router", router_proc))
+        wait_for_health(f"{router_url}/health", args.startup_timeout, router_proc, "Combined router")
     except Exception:
         for process in reversed(processes):
             terminate_process(process)
@@ -288,21 +295,12 @@ def main() -> int:
         )
         return 1
 
-    if _domains_conflict(args.llm_domain, args.cli_domain):
-        print(
-            "LLM_NGROK_DOMAIN and CLI_NGROK_DOMAIN must be different when running both services.",
-            file=sys.stderr,
-        )
-        return 1
-
     repo_dir = Path(__file__).resolve().parent
-    llm_proxy_url = f"http://localhost:{args.llm_proxy_port}"
-    cli_bridge_url = f"http://localhost:{args.cli_bridge_port}"
+    router_url = f"http://localhost:{args.router_port}"
 
     processes: List[ManagedProcess] = []
     tunnels = [
-        ManagedTunnel("LLM proxy", llm_proxy_url, args.llm_domain),
-        ManagedTunnel("CLI bridge", cli_bridge_url, args.cli_domain),
+        ManagedTunnel("Combined router", router_url, args.domain),
     ]
 
     try:
@@ -316,7 +314,7 @@ def main() -> int:
     ngrok.set_auth_token(token)
 
     try:
-        print("Local services are healthy. Starting ngrok tunnels...")
+        print("Local services are healthy. Starting ngrok tunnel...")
         connect_all_tunnels(args, tunnels)
     except Exception as exc:  # noqa: BLE001
         print(str(exc), file=sys.stderr)
@@ -328,7 +326,7 @@ def main() -> int:
             terminate_process(process)
         return 1
 
-    print("Both services are running. Press Ctrl+C to stop.")
+    print("Combined endpoint is running. Press Ctrl+C to stop.")
 
     stop = False
 

@@ -32,7 +32,8 @@
   "forwardPorts": [
     8330,
     8340,
-    8350
+    8350,
+    8360
   ],
   "portsAttributes": {
     "8330": {
@@ -43,6 +44,9 @@
     },
     "8350": {
       "label": "CLI Bridge"
+    },
+    "8360": {
+      "label": "Combined Router"
     }
   },
   "postCreateCommand": "bash .devcontainer/post-create.sh"
