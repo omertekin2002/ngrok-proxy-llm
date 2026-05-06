@@ -12,11 +12,22 @@ import time
 import uuid
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+
+from attachment_utils import (
+    AttachmentError,
+    AttachmentLimits,
+    RequestContext,
+    context_from_chat_payload,
+    context_from_responses_payload,
+    extract_text,
+    payload_from_request,
+    render_prompt,
+)
 
 load_dotenv()
 
@@ -57,91 +68,7 @@ def _auth_failed() -> JSONResponse:
 
 
 def _extract_text(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        part_type = str(content.get("type", "")).lower()
-        if part_type in {"text", "input_text", "output_text"}:
-            return str(content.get("text", ""))
-        if "text" in content:
-            return str(content.get("text", ""))
-        return ""
-    if isinstance(content, list):
-        parts = [_extract_text(item).strip() for item in content]
-        return "\n".join(part for part in parts if part)
-    return str(content)
-
-
-def _normalize_chat_messages(messages: Any) -> List[Dict[str, str]]:
-    normalized: List[Dict[str, str]] = []
-    if not isinstance(messages, list):
-        return normalized
-
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role", "user")).strip().lower() or "user"
-        text = _extract_text(message.get("content")).strip()
-        if not text:
-            continue
-        normalized.append({"role": role, "content": text})
-    return normalized
-
-
-def _normalize_responses_input(payload: Dict[str, Any]) -> Tuple[List[Dict[str, str]], Optional[str]]:
-    instructions = _extract_text(payload.get("instructions")).strip() or None
-    input_value = payload.get("input")
-
-    if isinstance(input_value, str):
-        return [{"role": "user", "content": input_value.strip()}], instructions
-
-    if isinstance(input_value, list):
-        messages: List[Dict[str, str]] = []
-        for item in input_value:
-            if isinstance(item, dict) and "role" in item:
-                text = _extract_text(item.get("content")).strip()
-                if text:
-                    messages.append(
-                        {
-                            "role": str(item.get("role", "user")).strip().lower() or "user",
-                            "content": text,
-                        }
-                    )
-                    continue
-
-            text = _extract_text(item).strip()
-            if text:
-                messages.append({"role": "user", "content": text})
-        return messages, instructions
-
-    if isinstance(input_value, dict):
-        text = _extract_text(input_value.get("content") or input_value).strip()
-        if text:
-            role = str(input_value.get("role", "user")).strip().lower() or "user"
-            return [{"role": role, "content": text}], instructions
-
-    return [], instructions
-
-
-def _render_prompt(messages: List[Dict[str, str]], instructions: Optional[str] = None) -> str:
-    sections: List[str] = [
-        "You are answering through a CLI bridge.",
-        "Return only the assistant response body.",
-    ]
-
-    if instructions:
-        sections.append("System instructions:\n" + instructions.strip())
-
-    if messages:
-        convo_lines = []
-        for message in messages:
-            convo_lines.append(f"{message['role'].upper()}:\n{message['content'].strip()}")
-        sections.append("Conversation:\n" + "\n\n".join(convo_lines))
-
-    sections.append("ASSISTANT:")
-    return "\n\n".join(sections).strip()
+    return extract_text(content)
 
 
 def _usage_from_tokens(input_tokens: int, output_tokens: int) -> Dict[str, int]:
@@ -255,7 +182,12 @@ class CliBackend(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    async def run(self, prompt: str, requested_model: Optional[str]) -> Dict[str, Any]:
+    async def run(
+        self,
+        prompt: str,
+        requested_model: Optional[str],
+        request_context: Optional[RequestContext] = None,
+    ) -> Dict[str, Any]:
         raise NotImplementedError
 
     async def startup_check(self) -> None:
@@ -302,6 +234,8 @@ class CodexBackend(CliBackend):
             "skip_git_repo_check": self.skip_git_repo_check,
             "web_search": self.enable_web_search,
             "max_concurrency": self.max_concurrency,
+            "attachments_supported": True,
+            "image_paths_supported": True,
         }
 
     def _cli_model_name(self, model: Optional[str]) -> Optional[str]:
@@ -312,7 +246,12 @@ class CodexBackend(CliBackend):
             return None
         return normalized
 
-    def _build_command(self, requested_model: Optional[str], last_message_path: Path) -> List[str]:
+    def _build_command(
+        self,
+        requested_model: Optional[str],
+        last_message_path: Path,
+        attachment_dirs: Optional[List[str]] = None,
+    ) -> List[str]:
         command = [
             self.binary,
             "exec",
@@ -339,16 +278,24 @@ class CodexBackend(CliBackend):
 
         for path in self.add_dirs:
             command.extend(["--add-dir", path])
+        for path in attachment_dirs or []:
+            command.extend(["--add-dir", path])
 
         command.extend(["-o", str(last_message_path), "-"])
         return command
 
-    async def run(self, prompt: str, requested_model: Optional[str]) -> Dict[str, Any]:
+    async def run(
+        self,
+        prompt: str,
+        requested_model: Optional[str],
+        request_context: Optional[RequestContext] = None,
+    ) -> Dict[str, Any]:
+        attachment_dirs = request_context.attachment_dirs if request_context else []
         with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt", delete=False) as tmp:
             last_message_path = Path(tmp.name)
 
         process = await asyncio.create_subprocess_exec(
-            *self._build_command(requested_model, last_message_path),
+            *self._build_command(requested_model, last_message_path, attachment_dirs),
             cwd=str(self.workdir),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -456,6 +403,8 @@ class GeminiBackend(CliBackend):
             "include_directories": self.include_directories,
             "extensions": self.extensions,
             "max_concurrency": self.max_concurrency,
+            "attachments_supported": True,
+            "image_paths_supported": True,
         }
 
     def _cli_model_name(self, model: Optional[str]) -> Optional[str]:
@@ -466,7 +415,11 @@ class GeminiBackend(CliBackend):
             return None
         return normalized
 
-    def _build_command(self, requested_model: Optional[str]) -> List[str]:
+    def _build_command(
+        self,
+        requested_model: Optional[str],
+        attachment_dirs: Optional[List[str]] = None,
+    ) -> List[str]:
         command = [
             self.binary,
             "--output-format",
@@ -487,15 +440,23 @@ class GeminiBackend(CliBackend):
 
         for path in self.include_directories:
             command.extend(["--include-directories", path])
+        for path in attachment_dirs or []:
+            command.extend(["--include-directories", path])
 
         if self.extensions:
             command.extend(["--extensions", *self.extensions])
 
         return command
 
-    async def run(self, prompt: str, requested_model: Optional[str]) -> Dict[str, Any]:
+    async def run(
+        self,
+        prompt: str,
+        requested_model: Optional[str],
+        request_context: Optional[RequestContext] = None,
+    ) -> Dict[str, Any]:
+        attachment_dirs = request_context.attachment_dirs if request_context else []
         process = await asyncio.create_subprocess_exec(
-            *self._build_command(requested_model),
+            *self._build_command(requested_model, attachment_dirs),
             cwd=str(self.workdir),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
@@ -560,6 +521,7 @@ CLI_BRIDGE_AUTH_TOKEN = (
     or os.getenv("CODEX_BRIDGE_AUTH_TOKEN", "").strip()
 )
 CLI_BRIDGE_DEFAULT_PROVIDER = os.getenv("CLI_BRIDGE_DEFAULT_PROVIDER", "").strip() or None
+ATTACHMENT_LIMITS = AttachmentLimits.from_env()
 
 AVAILABLE_BACKENDS: Dict[str, CliBackend] = {}
 if "codex" in ENABLED_PROVIDER_NAMES:
@@ -694,6 +656,11 @@ async def health() -> Dict[str, Any]:
         "providers": list(AVAILABLE_BACKENDS.keys()),
         "default_provider": CLI_BRIDGE_DEFAULT_PROVIDER or next(iter(AVAILABLE_BACKENDS.keys())),
         "auth_required": bool(CLI_BRIDGE_AUTH_TOKEN),
+        "attachments": {
+            "supported": True,
+            "multipart_supported": True,
+            "limits": ATTACHMENT_LIMITS.as_dict(),
+        },
         "backends": {
             name: backend.health()
             for name, backend in AVAILABLE_BACKENDS.items()
@@ -719,8 +686,21 @@ async def chat_completions(request: Request):
     if auth_error is not None:
         return auth_error
 
-    payload = await request.json()
+    request_context: Optional[RequestContext] = None
+    try:
+        payload, _ = await payload_from_request(request)
+        request_context = await context_from_chat_payload(payload)
+    except AttachmentError as exc:
+        return _json_error(
+            str(exc),
+            status_code=exc.status_code,
+            error_type="invalid_request_error",
+            code=exc.code,
+        )
+
     if payload.get("stream") is True:
+        if request_context is not None:
+            request_context.cleanup()
         return _json_error(
             "Streaming is not supported by the CLI bridge yet.",
             status_code=400,
@@ -728,10 +708,13 @@ async def chat_completions(request: Request):
             code="stream_unsupported",
         )
 
-    messages = _normalize_chat_messages(payload.get("messages"))
-    if not messages:
+    if request_context is None or (
+        not request_context.messages and not request_context.attachments
+    ):
+        if request_context is not None:
+            request_context.cleanup()
         return _json_error(
-            "Request must include at least one message with text content.",
+            "Request must include at least one message with text content or attachments.",
             status_code=400,
             error_type="invalid_request_error",
             code="missing_messages",
@@ -741,6 +724,7 @@ async def chat_completions(request: Request):
     try:
         backend = _resolve_backend(requested_model)
     except ValueError as exc:
+        request_context.cleanup()
         return _json_error(
             str(exc),
             status_code=400,
@@ -748,25 +732,32 @@ async def chat_completions(request: Request):
             code="unknown_model",
         )
 
-    prompt = _render_prompt(messages)
+    prompt = render_prompt(
+        request_context.messages,
+        attachments=request_context.attachments,
+        bridge_name="CLI bridge",
+    )
 
-    async with backend.semaphore:
-        try:
-            result = await backend.run(prompt, requested_model)
-        except TimeoutError as exc:
-            return _json_error(
-                str(exc),
-                status_code=504,
-                error_type="timeout_error",
-                code="request_timeout",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _json_error(
-                str(exc),
-                status_code=502,
-                error_type="server_error",
-                code="cli_exec_failed",
-            )
+    try:
+        async with backend.semaphore:
+            try:
+                result = await backend.run(prompt, requested_model, request_context)
+            except TimeoutError as exc:
+                return _json_error(
+                    str(exc),
+                    status_code=504,
+                    error_type="timeout_error",
+                    code="request_timeout",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_error(
+                    str(exc),
+                    status_code=502,
+                    error_type="server_error",
+                    code="cli_exec_failed",
+                )
+    finally:
+        request_context.cleanup()
 
     return _chat_completion_response(result, backend.selected_model(requested_model))
 
@@ -777,8 +768,21 @@ async def responses_api(request: Request):
     if auth_error is not None:
         return auth_error
 
-    payload = await request.json()
+    request_context: Optional[RequestContext] = None
+    try:
+        payload, _ = await payload_from_request(request)
+        request_context = await context_from_responses_payload(payload)
+    except AttachmentError as exc:
+        return _json_error(
+            str(exc),
+            status_code=exc.status_code,
+            error_type="invalid_request_error",
+            code=exc.code,
+        )
+
     if payload.get("stream") is True:
+        if request_context is not None:
+            request_context.cleanup()
         return _json_error(
             "Streaming is not supported by the CLI bridge yet.",
             status_code=400,
@@ -786,10 +790,13 @@ async def responses_api(request: Request):
             code="stream_unsupported",
         )
 
-    messages, instructions = _normalize_responses_input(payload)
-    if not messages:
+    if request_context is None or (
+        not request_context.messages and not request_context.attachments
+    ):
+        if request_context is not None:
+            request_context.cleanup()
         return _json_error(
-            "Request must include text input.",
+            "Request must include text input or attachments.",
             status_code=400,
             error_type="invalid_request_error",
             code="missing_input",
@@ -799,6 +806,7 @@ async def responses_api(request: Request):
     try:
         backend = _resolve_backend(requested_model)
     except ValueError as exc:
+        request_context.cleanup()
         return _json_error(
             str(exc),
             status_code=400,
@@ -806,24 +814,32 @@ async def responses_api(request: Request):
             code="unknown_model",
         )
 
-    prompt = _render_prompt(messages, instructions=instructions)
+    prompt = render_prompt(
+        request_context.messages,
+        instructions=request_context.instructions,
+        attachments=request_context.attachments,
+        bridge_name="CLI bridge",
+    )
 
-    async with backend.semaphore:
-        try:
-            result = await backend.run(prompt, requested_model)
-        except TimeoutError as exc:
-            return _json_error(
-                str(exc),
-                status_code=504,
-                error_type="timeout_error",
-                code="request_timeout",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _json_error(
-                str(exc),
-                status_code=502,
-                error_type="server_error",
-                code="cli_exec_failed",
-            )
+    try:
+        async with backend.semaphore:
+            try:
+                result = await backend.run(prompt, requested_model, request_context)
+            except TimeoutError as exc:
+                return _json_error(
+                    str(exc),
+                    status_code=504,
+                    error_type="timeout_error",
+                    code="request_timeout",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_error(
+                    str(exc),
+                    status_code=502,
+                    error_type="server_error",
+                    code="cli_exec_failed",
+                )
+    finally:
+        request_context.cleanup()
 
     return _responses_api_response(result, backend.selected_model(requested_model))

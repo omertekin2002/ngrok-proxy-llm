@@ -162,6 +162,12 @@ Common optional values:
 - `PROXY_RETRY_429_MAX_DELAY_SECONDS=30`
 - `PROXY_BUFFER_NON_STREAMING=true`
 - `PROXY_NONSTREAM_READ_RETRY_ATTEMPTS=1`
+- `CLI_BRIDGE_MAX_ATTACHMENTS=8`
+- `CLI_BRIDGE_MAX_ATTACHMENT_BYTES=10485760`
+- `CLI_BRIDGE_MAX_TOTAL_ATTACHMENT_BYTES=26214400`
+- `CLI_BRIDGE_ATTACHMENT_DOWNLOAD_TIMEOUT_SECONDS=15`
+- `CLI_BRIDGE_TEXT_PREVIEW_CHARS=12000`
+- `CLI_BRIDGE_ALLOW_LOCAL_FILE_REFERENCES=false`
 
 ### Codex bridge mode
 `make run-codex` starts a FastAPI bridge that runs `codex exec` per request, then exposes that bridge through ngrok.
@@ -244,6 +250,57 @@ curl https://YOUR_PUBLIC_URL/v1/chat/completions \
     ]
   }'
 ```
+
+### CLI bridge attachments
+The Codex, Gemini, and combined CLI bridge modes accept OpenAI-style multimodal JSON and multipart uploads. Attachments are saved into a temporary per-request directory, exposed to the CLI backend with `--add-dir` for Codex or `--include-directories` for Gemini, and described in the rendered prompt by filesystem path. Text-like files also get a bounded inline preview.
+
+Supported JSON content parts include:
+- `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}`
+- `{"type":"input_image","image_url":"https://example.com/image.png"}`
+- `{"type":"input_file","filename":"notes.txt","mime_type":"text/plain","file_data":"..."}` where `file_data` is base64
+- `{"type":"file","file":{"filename":"notes.txt","file_data":"..."}}`
+
+Remote `http` and `https` attachments are downloaded with strict limits. Local path and `file://` references are disabled by default for safety because this bridge is commonly exposed through ngrok; enable them only for trusted clients with `CLI_BRIDGE_ALLOW_LOCAL_FILE_REFERENCES=true`.
+
+Example JSON image request:
+```bash
+IMAGE_B64="$(base64 -i image.png)"
+curl https://YOUR_PUBLIC_URL/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_BRIDGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{
+    \"model\": \"gemini-cli\",
+    \"messages\": [
+      {
+        \"role\": \"user\",
+        \"content\": [
+          {\"type\": \"text\", \"text\": \"Describe this image.\"},
+          {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/png;base64,$IMAGE_B64\"}}
+        ]
+      }
+    ]
+  }"
+```
+
+Example multipart file request:
+```bash
+curl https://YOUR_PUBLIC_URL/v1/chat/completions \
+  -H "Authorization: Bearer YOUR_BRIDGE_TOKEN" \
+  -F 'payload={"model":"codex-cli","messages":[{"role":"user","content":"Summarize the attached file."}]};type=application/json' \
+  -F "attachments=@notes.txt;type=text/plain"
+```
+
+Attachment limits are controlled with:
+```env
+CLI_BRIDGE_MAX_ATTACHMENTS=8
+CLI_BRIDGE_MAX_ATTACHMENT_BYTES=10485760
+CLI_BRIDGE_MAX_TOTAL_ATTACHMENT_BYTES=26214400
+CLI_BRIDGE_ATTACHMENT_DOWNLOAD_TIMEOUT_SECONDS=15
+CLI_BRIDGE_TEXT_PREVIEW_CHARS=12000
+CLI_BRIDGE_ALLOW_LOCAL_FILE_REFERENCES=false
+```
+
+Image understanding depends on the selected CLI/model. The bridge makes image files available by path and asks the backend to inspect them, but a backend that cannot process images may still be limited to file metadata or text previews.
 
 ### LLM proxy retries
 For transient upstream hiccups, proxy calls retry automatically with exponential backoff.

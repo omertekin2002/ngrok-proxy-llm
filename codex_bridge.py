@@ -18,11 +18,22 @@ import tempfile
 import time
 import uuid
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+
+from attachment_utils import (
+    AttachmentError,
+    AttachmentLimits,
+    RequestContext,
+    context_from_chat_payload,
+    context_from_responses_payload,
+    extract_text,
+    payload_from_request,
+    render_prompt,
+)
 
 load_dotenv()
 
@@ -51,6 +62,7 @@ CODEX_ADD_DIRS = [
     for item in os.getenv("CODEX_ADD_DIRS", "").split(",")
     if item.strip()
 ]
+ATTACHMENT_LIMITS = AttachmentLimits.from_env()
 
 app = FastAPI(title="Codex CLI Bridge", version="1.0.0")
 app.state.codex_semaphore = asyncio.Semaphore(CODEX_MAX_CONCURRENCY)
@@ -91,92 +103,7 @@ async def _authorize(request: Request) -> Optional[JSONResponse]:
 
 
 def _extract_text(content: Any) -> str:
-    if content is None:
-        return ""
-    if isinstance(content, str):
-        return content
-    if isinstance(content, dict):
-        part_type = str(content.get("type", "")).lower()
-        if part_type in {"text", "input_text", "output_text"}:
-            return str(content.get("text", ""))
-        if "text" in content:
-            return str(content.get("text", ""))
-        return ""
-    if isinstance(content, list):
-        parts = [_extract_text(item).strip() for item in content]
-        return "\n".join(part for part in parts if part)
-    return str(content)
-
-
-def _normalize_chat_messages(messages: Any) -> List[Dict[str, str]]:
-    normalized: List[Dict[str, str]] = []
-    if not isinstance(messages, list):
-        return normalized
-
-    for message in messages:
-        if not isinstance(message, dict):
-            continue
-        role = str(message.get("role", "user")).strip().lower() or "user"
-        text = _extract_text(message.get("content")).strip()
-        if not text:
-            continue
-        normalized.append({"role": role, "content": text})
-    return normalized
-
-
-def _normalize_responses_input(payload: Dict[str, Any]) -> Tuple[List[Dict[str, str]], Optional[str]]:
-    instructions = _extract_text(payload.get("instructions")).strip() or None
-    input_value = payload.get("input")
-
-    if isinstance(input_value, str):
-        return [{"role": "user", "content": input_value.strip()}], instructions
-
-    if isinstance(input_value, list):
-        messages: List[Dict[str, str]] = []
-        for item in input_value:
-            if isinstance(item, dict) and "role" in item:
-                text = _extract_text(item.get("content")).strip()
-                if text:
-                    messages.append(
-                        {
-                            "role": str(item.get("role", "user")).strip().lower() or "user",
-                            "content": text,
-                        }
-                    )
-                    continue
-
-            text = _extract_text(item).strip()
-            if text:
-                messages.append({"role": "user", "content": text})
-        return messages, instructions
-
-    if isinstance(input_value, dict):
-        text = _extract_text(input_value.get("content") or input_value).strip()
-        if text:
-            role = str(input_value.get("role", "user")).strip().lower() or "user"
-            return [{"role": role, "content": text}], instructions
-
-    return [], instructions
-
-
-def _render_prompt(messages: List[Dict[str, str]], instructions: Optional[str] = None) -> str:
-    sections: List[str] = [
-        "You are answering through a Codex CLI bridge.",
-        "Return only the assistant response body.",
-    ]
-
-    if instructions:
-        sections.append("System instructions:\n" + instructions.strip())
-
-    if messages:
-        convo_lines = []
-        for message in messages:
-            role = message["role"].upper()
-            convo_lines.append(f"{role}:\n{message['content'].strip()}")
-        sections.append("Conversation:\n" + "\n\n".join(convo_lines))
-
-    sections.append("ASSISTANT:")
-    return "\n\n".join(sections).strip()
+    return extract_text(content)
 
 
 def _usage_from_event(usage: Dict[str, Any]) -> Dict[str, int]:
@@ -199,7 +126,10 @@ async def _read_lines(stream: asyncio.StreamReader) -> List[str]:
     return lines
 
 
-def _build_codex_command(model: Optional[str]) -> List[str]:
+def _build_codex_command(
+    model: Optional[str],
+    attachment_dirs: Optional[List[str]] = None,
+) -> List[str]:
     command = [
         CODEX_BINARY,
         "exec",
@@ -226,15 +156,22 @@ def _build_codex_command(model: Optional[str]) -> List[str]:
 
     for path in CODEX_ADD_DIRS:
         command.extend(["--add-dir", path])
+    for path in attachment_dirs or []:
+        command.extend(["--add-dir", path])
 
     return command
 
 
-async def _run_codex(prompt: str, model: Optional[str]) -> Dict[str, Any]:
+async def _run_codex(
+    prompt: str,
+    model: Optional[str],
+    request_context: Optional[RequestContext] = None,
+) -> Dict[str, Any]:
     with tempfile.NamedTemporaryFile(prefix="codex-last-", suffix=".txt", delete=False) as tmp:
         last_message_path = Path(tmp.name)
 
-    command = _build_codex_command(model)
+    attachment_dirs = request_context.attachment_dirs if request_context else []
+    command = _build_codex_command(model, attachment_dirs)
     command.extend(["-o", str(last_message_path), "-"])
 
     process = await asyncio.create_subprocess_exec(
@@ -422,6 +359,12 @@ async def health() -> Dict[str, Any]:
         "web_search": CODEX_ENABLE_WEB_SEARCH,
         "max_concurrency": CODEX_MAX_CONCURRENCY,
         "auth_required": bool(CODEX_BRIDGE_AUTH_TOKEN),
+        "attachments": {
+            "supported": True,
+            "multipart_supported": True,
+            "image_paths_supported": True,
+            "limits": ATTACHMENT_LIMITS.as_dict(),
+        },
     }
 
 
@@ -459,8 +402,21 @@ async def chat_completions(request: Request):
     if auth_error is not None:
         return auth_error
 
-    payload = await request.json()
+    request_context: Optional[RequestContext] = None
+    try:
+        payload, _ = await payload_from_request(request)
+        request_context = await context_from_chat_payload(payload)
+    except AttachmentError as exc:
+        return _json_error(
+            str(exc),
+            status_code=exc.status_code,
+            error_type="invalid_request_error",
+            code=exc.code,
+        )
+
     if payload.get("stream") is True:
+        if request_context is not None:
+            request_context.cleanup()
         return _json_error(
             "Streaming is not supported by the Codex bridge yet.",
             status_code=400,
@@ -468,35 +424,45 @@ async def chat_completions(request: Request):
             code="stream_unsupported",
         )
 
-    messages = _normalize_chat_messages(payload.get("messages"))
-    if not messages:
+    if request_context is None or (
+        not request_context.messages and not request_context.attachments
+    ):
+        if request_context is not None:
+            request_context.cleanup()
         return _json_error(
-            "Request must include at least one message with text content.",
+            "Request must include at least one message with text content or attachments.",
             status_code=400,
             error_type="invalid_request_error",
             code="missing_messages",
         )
 
-    prompt = _render_prompt(messages)
+    prompt = render_prompt(
+        request_context.messages,
+        attachments=request_context.attachments,
+        bridge_name="Codex CLI bridge",
+    )
     requested_model = payload.get("model")
 
-    async with app.state.codex_semaphore:
-        try:
-            result = await _run_codex(prompt, requested_model)
-        except TimeoutError as exc:
-            return _json_error(
-                str(exc),
-                status_code=504,
-                error_type="timeout_error",
-                code="request_timeout",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _json_error(
-                str(exc),
-                status_code=502,
-                error_type="server_error",
-                code="codex_exec_failed",
-            )
+    try:
+        async with app.state.codex_semaphore:
+            try:
+                result = await _run_codex(prompt, requested_model, request_context)
+            except TimeoutError as exc:
+                return _json_error(
+                    str(exc),
+                    status_code=504,
+                    error_type="timeout_error",
+                    code="request_timeout",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_error(
+                    str(exc),
+                    status_code=502,
+                    error_type="server_error",
+                    code="codex_exec_failed",
+                )
+    finally:
+        request_context.cleanup()
 
     return _chat_completion_response(result, _selected_model(requested_model))
 
@@ -507,8 +473,21 @@ async def responses_api(request: Request):
     if auth_error is not None:
         return auth_error
 
-    payload = await request.json()
+    request_context: Optional[RequestContext] = None
+    try:
+        payload, _ = await payload_from_request(request)
+        request_context = await context_from_responses_payload(payload)
+    except AttachmentError as exc:
+        return _json_error(
+            str(exc),
+            status_code=exc.status_code,
+            error_type="invalid_request_error",
+            code=exc.code,
+        )
+
     if payload.get("stream") is True:
+        if request_context is not None:
+            request_context.cleanup()
         return _json_error(
             "Streaming is not supported by the Codex bridge yet.",
             status_code=400,
@@ -516,34 +495,45 @@ async def responses_api(request: Request):
             code="stream_unsupported",
         )
 
-    messages, instructions = _normalize_responses_input(payload)
-    if not messages:
+    if request_context is None or (
+        not request_context.messages and not request_context.attachments
+    ):
+        if request_context is not None:
+            request_context.cleanup()
         return _json_error(
-            "Request must include text input.",
+            "Request must include text input or attachments.",
             status_code=400,
             error_type="invalid_request_error",
             code="missing_input",
         )
 
-    prompt = _render_prompt(messages, instructions=instructions)
+    prompt = render_prompt(
+        request_context.messages,
+        instructions=request_context.instructions,
+        attachments=request_context.attachments,
+        bridge_name="Codex CLI bridge",
+    )
     requested_model = payload.get("model")
 
-    async with app.state.codex_semaphore:
-        try:
-            result = await _run_codex(prompt, requested_model)
-        except TimeoutError as exc:
-            return _json_error(
-                str(exc),
-                status_code=504,
-                error_type="timeout_error",
-                code="request_timeout",
-            )
-        except Exception as exc:  # noqa: BLE001
-            return _json_error(
-                str(exc),
-                status_code=502,
-                error_type="server_error",
-                code="codex_exec_failed",
-            )
+    try:
+        async with app.state.codex_semaphore:
+            try:
+                result = await _run_codex(prompt, requested_model, request_context)
+            except TimeoutError as exc:
+                return _json_error(
+                    str(exc),
+                    status_code=504,
+                    error_type="timeout_error",
+                    code="request_timeout",
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_error(
+                    str(exc),
+                    status_code=502,
+                    error_type="server_error",
+                    code="codex_exec_failed",
+                )
+    finally:
+        request_context.cleanup()
 
     return _responses_api_response(result, _selected_model(requested_model))
