@@ -4,9 +4,9 @@ LLM_LOCAL_URL ?= http://localhost:8317
 LLM_PROXY_PORT ?= 8330
 CLI_BRIDGE_PORT ?= 8350
 COMBINED_PROXY_PORT ?= 8360
-CLI_BRIDGE_PROVIDERS ?= codex,gemini
+CLI_BRIDGE_PROVIDERS ?= codex
 
-.PHONY: setup run run-all help run-llm run-llm-direct run-codex run-gemini run-cli check-models probe-model
+.PHONY: setup run run-all help run-llm run-llm-direct run-codex check-models probe-model
 
 help:
 	@echo "Available targets:"
@@ -16,8 +16,6 @@ help:
 	@echo "  make run-llm    - LLM-only mode via local retry proxy + ngrok"
 	@echo "  make run-llm-direct - tunnel LLM endpoint directly (no retry proxy)"
 	@echo "  make run-codex  - expose local Codex CLI bridge via ngrok"
-	@echo "  make run-gemini - expose local Gemini CLI bridge via ngrok"
-	@echo "  make run-cli    - expose a combined Codex + Gemini CLI bridge via ngrok"
 	@echo "  make check-models - list models on local, proxy, and public endpoints"
 	@echo "  make probe-model MODEL=... PROMPT='...' - probe one model via chat completions"
 
@@ -40,12 +38,6 @@ run-llm-direct:
 
 run-codex:
 	@. .venv/bin/activate && python run_codex_pipeline.py
-
-run-gemini:
-	@. .venv/bin/activate && python run_cli_pipeline.py --providers gemini
-
-run-cli:
-	@. .venv/bin/activate && python run_cli_pipeline.py --providers codex,gemini
 
 check-models:
 	@./scripts/check_models.sh

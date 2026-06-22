@@ -8,7 +8,6 @@ from fastapi.testclient import TestClient
 
 import attachment_utils
 import cli_bridge
-import codex_bridge
 
 
 def _b64(value: bytes) -> str:
@@ -128,19 +127,6 @@ class BackendCommandTests(unittest.TestCase):
             Path("/tmp/last.txt"),
             ["/tmp/attach"],
         )
-
-        self.assertIn("--add-dir", command)
-        self.assertIn("/tmp/attach", command)
-
-    def test_gemini_backend_adds_attachment_dirs(self):
-        backend = cli_bridge.GeminiBackend()
-        command = backend._build_command("gemini-cli", ["/tmp/attach"])
-
-        self.assertIn("--include-directories", command)
-        self.assertIn("/tmp/attach", command)
-
-    def test_legacy_codex_bridge_adds_attachment_dirs(self):
-        command = codex_bridge._build_codex_command("codex-cli", ["/tmp/attach"])
 
         self.assertIn("--add-dir", command)
         self.assertIn("/tmp/attach", command)

@@ -18,10 +18,10 @@ LLM_PROXY_URL = os.getenv("LLM_PROXY_URL", "http://localhost:8330").rstrip("/")
 CLI_BRIDGE_URL = os.getenv("CLI_BRIDGE_URL", "http://localhost:8350").rstrip("/")
 ROUTER_CLI_MODELS = {
     model.strip()
-    for model in os.getenv("ROUTER_CLI_MODELS", "codex-cli,gemini-cli").split(",")
+    for model in os.getenv("ROUTER_CLI_MODELS", "codex-cli").split(",")
     if model.strip()
 }
-for env_name in ("CODEX_MODEL", "GEMINI_MODEL"):
+for env_name in ("CODEX_MODEL",):
     configured_model = os.getenv(env_name, "").strip()
     if configured_model:
         ROUTER_CLI_MODELS.add(configured_model)

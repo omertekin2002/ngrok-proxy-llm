@@ -6,7 +6,6 @@ import combined_proxy
 class CombinedProxyRoutingTests(unittest.TestCase):
     def test_routes_explicit_cli_models_to_cli_bridge(self):
         self.assertTrue(combined_proxy._routes_to_cli("codex-cli"))
-        self.assertTrue(combined_proxy._routes_to_cli("gemini-cli"))
 
     def test_routes_regular_models_to_llm_proxy(self):
         self.assertFalse(combined_proxy._routes_to_cli("gpt-5.5"))
@@ -26,13 +25,13 @@ class CombinedProxyRoutingTests(unittest.TestCase):
                 "object": "list",
                 "data": [
                     {"id": "codex-cli", "object": "model", "owned_by": "cli"},
-                    {"id": "gemini-cli", "object": "model"},
+                    {"id": "gpt-5.4-mini", "object": "model"},
                 ],
             },
         )
 
         self.assertEqual(
-            ["gpt-5.5", "codex-cli", "gemini-cli"],
+            ["gpt-5.5", "codex-cli", "gpt-5.4-mini"],
             [item["id"] for item in merged["data"]],
         )
 

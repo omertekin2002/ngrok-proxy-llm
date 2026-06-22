@@ -85,11 +85,14 @@ def main() -> int:
     bridge_url = f"http://localhost:{args.bridge_port}"
     health_url = f"{bridge_url}/health"
 
+    bridge_env = os.environ.copy()
+    bridge_env["CLI_BRIDGE_PROVIDERS"] = "codex"
+
     bridge_cmd = [
         sys.executable,
         "-m",
         "uvicorn",
-        "codex_bridge:app",
+        "cli_bridge:app",
         "--host",
         "0.0.0.0",
         "--port",
@@ -99,7 +102,7 @@ def main() -> int:
     print("Starting Codex CLI bridge server...")
     print(f"  Local bridge: {bridge_url}")
 
-    bridge_proc = subprocess.Popen(bridge_cmd, cwd=repo_dir, env=os.environ.copy())
+    bridge_proc = subprocess.Popen(bridge_cmd, cwd=repo_dir, env=bridge_env)
 
     try:
         wait_for_health(health_url, args.startup_timeout, bridge_proc)

@@ -14,19 +14,15 @@ if [[ ! -f .env ]]; then
 fi
 
 if ! command -v npm >/dev/null 2>&1; then
-  echo "[post-create] npm is not available; skipping Codex and Gemini CLI installation" >&2
+  echo "[post-create] npm is not available; skipping Codex CLI installation" >&2
   exit 0
 fi
 
 echo "[post-create] Installing Codex CLI"
 npm install -g @openai/codex@latest
 
-echo "[post-create] Installing Gemini CLI"
-npm install -g @google/gemini-cli@latest
-
 echo "[post-create] Verifying CLI installs"
 codex --version || true
-gemini --version || true
 
 cat <<'EOF'
 
@@ -34,7 +30,6 @@ cat <<'EOF'
   1. Set NGROK_AUTH_TOKEN in .env or as a Codespaces secret
   2. Set CLI_BRIDGE_AUTH_TOKEN in .env or as a Codespaces secret
   3. Authenticate Codex by running: codex
-  4. Authenticate Gemini by running: gemini
-  5. Start the bridge with: make run-cli
+  4. Start the bridge with: make run-codex
 
 EOF

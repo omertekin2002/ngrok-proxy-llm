@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Expose Codex CLI and/or Gemini CLI through an OpenAI-compatible bridge."""
+"""Expose Codex CLI through an OpenAI-compatible bridge."""
 
 from __future__ import annotations
 
@@ -77,33 +77,6 @@ def _usage_from_tokens(input_tokens: int, output_tokens: int) -> Dict[str, int]:
         "completion_tokens": max(0, output_tokens),
         "total_tokens": max(0, input_tokens) + max(0, output_tokens),
     }
-
-
-def _parse_json_object_from_text(text: str) -> Dict[str, Any]:
-    stripped = text.strip()
-    if not stripped:
-        raise RuntimeError("Gemini CLI returned empty output.")
-
-    try:
-        payload = json.loads(stripped)
-    except json.JSONDecodeError:
-        payload = None
-
-    if isinstance(payload, dict):
-        return payload
-
-    decoder = json.JSONDecoder()
-    for index, char in enumerate(stripped):
-        if char != "{":
-            continue
-        try:
-            candidate, end_index = decoder.raw_decode(stripped[index:])
-        except json.JSONDecodeError:
-            continue
-        if isinstance(candidate, dict) and not stripped[index + end_index :].strip():
-            return candidate
-
-    raise RuntimeError(f"Failed to parse Gemini JSON output: {stripped[:400]}")
 
 
 async def _read_lines(stream: asyncio.StreamReader) -> List[str]:
@@ -372,149 +345,6 @@ class CodexBackend(CliBackend):
         }
 
 
-class GeminiBackend(CliBackend):
-    def __init__(self) -> None:
-        repo_dir = Path(__file__).resolve().parent
-        approval_mode = os.getenv("GEMINI_APPROVAL_MODE")
-        self.approval_mode = approval_mode.strip() if approval_mode and approval_mode.strip() else None
-        self.sandbox = _parse_bool(os.getenv("GEMINI_SANDBOX"), True)
-        self.include_directories = _split_csv(os.getenv("GEMINI_INCLUDE_DIRECTORIES", ""))
-        self.extensions = _split_csv(os.getenv("GEMINI_EXTENSIONS", ""))
-        super().__init__(
-            provider_name="gemini",
-            alias_model_id="gemini-cli",
-            binary=os.getenv("GEMINI_BINARY", "gemini").strip() or "gemini",
-            workdir=Path(os.getenv("GEMINI_WORKDIR", str(repo_dir))).expanduser(),
-            default_model=os.getenv("GEMINI_MODEL", "").strip() or None,
-            max_concurrency=int(os.getenv("GEMINI_MAX_CONCURRENCY", "1")),
-            request_timeout_seconds=int(os.getenv("GEMINI_REQUEST_TIMEOUT_SECONDS", "900")),
-        )
-
-    def _matches_provider_model_name(self, model: str) -> bool:
-        return model.lower().startswith("gemini")
-
-    def health(self) -> Dict[str, Any]:
-        return {
-            "binary": self.binary,
-            "workdir": str(self.workdir),
-            "default_model": self.default_model,
-            "approval_mode": self.approval_mode,
-            "sandbox": self.sandbox,
-            "include_directories": self.include_directories,
-            "extensions": self.extensions,
-            "max_concurrency": self.max_concurrency,
-            "attachments_supported": True,
-            "image_paths_supported": True,
-        }
-
-    def _cli_model_name(self, model: Optional[str]) -> Optional[str]:
-        if model is None:
-            return None
-        normalized = str(model).strip()
-        if not normalized or normalized == self.alias_model_id:
-            return None
-        return normalized
-
-    def _build_command(
-        self,
-        requested_model: Optional[str],
-        attachment_dirs: Optional[List[str]] = None,
-    ) -> List[str]:
-        command = [
-            self.binary,
-            "--output-format",
-            "json",
-            "-p",
-            "",
-        ]
-
-        if self.approval_mode:
-            command.extend(["--approval-mode", self.approval_mode])
-
-        if self.sandbox:
-            command.append("--sandbox")
-
-        selected_model = self._cli_model_name(requested_model) or self._cli_model_name(self.default_model)
-        if selected_model:
-            command.extend(["--model", selected_model])
-
-        for path in self.include_directories:
-            command.extend(["--include-directories", path])
-        for path in attachment_dirs or []:
-            command.extend(["--include-directories", path])
-
-        if self.extensions:
-            command.extend(["--extensions", *self.extensions])
-
-        return command
-
-    async def run(
-        self,
-        prompt: str,
-        requested_model: Optional[str],
-        request_context: Optional[RequestContext] = None,
-    ) -> Dict[str, Any]:
-        attachment_dirs = request_context.attachment_dirs if request_context else []
-        process = await asyncio.create_subprocess_exec(
-            *self._build_command(requested_model, attachment_dirs),
-            cwd=str(self.workdir),
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            env=os.environ.copy(),
-        )
-
-        if process.stdin is None or process.stdout is None or process.stderr is None:
-            raise RuntimeError("Failed to create Gemini subprocess pipes.")
-
-        stdout_task = asyncio.create_task(_read_lines(process.stdout))
-        stderr_task = asyncio.create_task(_read_lines(process.stderr))
-
-        process.stdin.write(prompt.encode("utf-8"))
-        await process.stdin.drain()
-        process.stdin.close()
-
-        try:
-            return_code = await asyncio.wait_for(
-                process.wait(), timeout=max(1, self.request_timeout_seconds)
-            )
-        except asyncio.TimeoutError as exc:
-            process.kill()
-            await process.wait()
-            await stdout_task
-            await stderr_task
-            raise TimeoutError(
-                f"Gemini request exceeded {self.request_timeout_seconds} seconds."
-            ) from exc
-
-        stdout_lines, stderr_lines = await asyncio.gather(stdout_task, stderr_task)
-        stdout_text = "\n".join(line for line in stdout_lines if line.strip()).strip()
-        stderr_text = "\n".join(line for line in stderr_lines if line.strip()).strip()
-
-        if return_code != 0:
-            raise RuntimeError(stderr_text or stdout_text or "Gemini CLI exited with a non-zero status.")
-
-        payload = _parse_json_object_from_text(stdout_text)
-
-        response_text = str(payload.get("response", "")).strip()
-        stats = payload.get("stats") or {}
-        models_stats = stats.get("models") or {}
-        raw_model = next(iter(models_stats.keys()), None) or self.selected_model(requested_model)
-        model_stats = models_stats.get(raw_model) if isinstance(models_stats, dict) else {}
-        token_stats = model_stats.get("tokens") if isinstance(model_stats, dict) else {}
-
-        input_tokens = int((token_stats or {}).get("input", 0) or 0)
-        output_tokens = int((token_stats or {}).get("candidates", 0) or 0)
-
-        return {
-            "provider": self.provider_name,
-            "text": response_text,
-            "thread_id": payload.get("session_id"),
-            "usage": _usage_from_tokens(input_tokens, output_tokens),
-            "raw_model": raw_model,
-        }
-
-
 ENABLED_PROVIDER_NAMES = _split_csv(os.getenv("CLI_BRIDGE_PROVIDERS", "codex"))
 CLI_BRIDGE_AUTH_TOKEN = (
     os.getenv("CLI_BRIDGE_AUTH_TOKEN", "").strip()
@@ -526,8 +356,6 @@ ATTACHMENT_LIMITS = AttachmentLimits.from_env()
 AVAILABLE_BACKENDS: Dict[str, CliBackend] = {}
 if "codex" in ENABLED_PROVIDER_NAMES:
     AVAILABLE_BACKENDS["codex"] = CodexBackend()
-if "gemini" in ENABLED_PROVIDER_NAMES:
-    AVAILABLE_BACKENDS["gemini"] = GeminiBackend()
 
 if not AVAILABLE_BACKENDS:
     raise RuntimeError("CLI_BRIDGE_PROVIDERS must enable at least one provider.")

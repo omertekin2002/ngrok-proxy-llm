@@ -43,7 +43,7 @@ def _parse_bool(value: Optional[str], default: bool) -> bool:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            "Run the LLM retry proxy and combined Codex/Gemini CLI bridge "
+            "Run the LLM retry proxy and Codex CLI bridge "
             "behind one OpenAI-compatible router, then expose that router through ngrok."
         )
     )
@@ -72,8 +72,8 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--providers",
-        default=os.getenv("CLI_BRIDGE_PROVIDERS", "codex,gemini"),
-        help="Comma-separated CLI providers to enable (default: codex,gemini)",
+        default=os.getenv("CLI_BRIDGE_PROVIDERS", "codex"),
+        help="Comma-separated CLI providers to enable (default: codex)",
     )
     parser.add_argument(
         "--startup-timeout",

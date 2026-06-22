@@ -6,14 +6,12 @@ This repo supports:
 - an existing local LLM API proxied from `http://localhost:8317` by default
 - a default combined mode that exposes the LLM proxy and CLI bridge at the same time
 - an optional Codex CLI bridge exposed through its own ngrok URL
-- an optional Gemini CLI bridge
-- an optional combined Codex + Gemini CLI bridge
 
 ## Prerequisites
 - Python 3.9+
 - ngrok account + auth token
 - Local LLM API already running for `make run`, `make run-llm`, or `make run-llm-direct`
-- Codex and Gemini CLIs installed/authenticated for the default `make run` combined bridge, unless you override `CLI_BRIDGE_PROVIDERS`
+- Codex CLI installed/authenticated for the default `make run` bridge
 
 ## Quick start
 ```bash
@@ -42,16 +40,6 @@ Run Codex bridge mode:
 make run-codex
 ```
 
-Run Gemini bridge mode:
-```bash
-make run-gemini
-```
-
-Run combined Codex + Gemini bridge mode:
-```bash
-make run-cli
-```
-
 ## Codespaces
 This repo can run in GitHub Codespaces now.
 
@@ -59,7 +47,7 @@ The included devcontainer:
 - uses Python 3.11
 - installs Node.js LTS to make CLI installation easier
 - creates `.venv` and installs `requirements.txt`
-- installs `@openai/codex` and `@google/gemini-cli`
+- installs `@openai/codex`
 - forwards ports `8330`, `8340`, `8350`, and `8360`
 
 After the Codespace is created:
@@ -73,14 +61,12 @@ NGROK_AUTH_TOKEN=your_real_ngrok_token_here
 CLI_BRIDGE_AUTH_TOKEN=choose_a_long_random_secret
 ```
 
-Then install and authenticate the provider CLIs inside the Codespace itself:
+Then install and authenticate the provider CLI inside the Codespace itself:
 - `codex` is installed automatically by the post-create script
-- `gemini` is installed automatically by the post-create script
 
-You still need to authenticate them after the Codespace starts:
+You still need to authenticate it after the Codespace starts:
 ```bash
 codex
-gemini
 ```
 
 Once those are available on `PATH`, you can run:
@@ -92,11 +78,11 @@ Notes:
 - In a Codespace, `localhost` means the Codespace VM, not your laptop
 - If you only need private access, Codespaces port forwarding can replace ngrok for `8360`
 - If you use `make run`, your LLM backend also needs to run inside the Codespace
-- If you only need the CLI bridge in Codespaces, use `make run-cli`
+- If you only need the CLI bridge in Codespaces, use `make run-codex`
 
 ## What `make run` does
 1. Starts a local retrying proxy in front of your LLM backend
-2. Starts the combined Codex + Gemini CLI bridge
+2. Starts the Codex CLI bridge
 3. Starts a combined OpenAI-compatible router
 4. Exposes that router through one ngrok URL
 
@@ -106,7 +92,7 @@ If the combined router tunnel prints `https://example.ngrok-free.dev`, likely en
 - `https://example.ngrok-free.dev/v1/chat/completions`
 - `https://example.ngrok-free.dev/v1/responses`
 
-The router merges `/v1/models` from the LLM proxy and CLI bridge. Requests using `model: "codex-cli"` or `model: "gemini-cli"` route to the CLI bridge. Other model names route to the LLM proxy.
+The router merges `/v1/models` from the LLM proxy and CLI bridge. Requests using `model: "codex-cli"` route to the CLI bridge. Other model names route to the LLM proxy.
 
 If you set a reserved `NGROK_DOMAIN`, `make run` uses it for the combined public router. `COMBINED_NGROK_DOMAIN` overrides `NGROK_DOMAIN` for `make run`.
 
@@ -131,8 +117,6 @@ If ngrok prints `https://example.ngrok-free.dev`, likely endpoints are:
 - `make run-llm`: LLM-only mode via local retry proxy + ngrok
 - `make run-llm-direct`: direct LLM tunnel without the retry proxy
 - `make run-codex`: Codex CLI bridge via ngrok
-- `make run-gemini`: Gemini CLI bridge via ngrok
-- `make run-cli`: combined Codex + Gemini CLI bridge via ngrok
 
 ## Configuration
 Required:
@@ -144,12 +128,12 @@ Common optional values:
 - `CODEX_BRIDGE_PORT=8340`
 - `CLI_BRIDGE_PORT=8350`
 - `COMBINED_PROXY_PORT=8360`
-- `CLI_BRIDGE_PROVIDERS=codex,gemini`
+- `CLI_BRIDGE_PROVIDERS=codex`
 - `NGROK_REGION=us`
 - `NGROK_DOMAIN=your-subdomain.ngrok.app`
 - `COMBINED_NGROK_DOMAIN=your-combined-subdomain.ngrok.app`
 - `RUN_ALL_STARTUP_TIMEOUT=120`
-- `ROUTER_CLI_MODELS=codex-cli,gemini-cli`
+- `ROUTER_CLI_MODELS=codex-cli`
 - `NGROK_RECONNECT_CHECK_SECONDS=15`
 - `NGROK_RECONNECT_FAILURE_THRESHOLD=2`
 - `NGROK_RECONNECT_MAX_ATTEMPTS=0`
@@ -210,49 +194,8 @@ curl https://YOUR_PUBLIC_URL/v1/chat/completions \
   }'
 ```
 
-### Gemini and combined CLI bridge modes
-`make run-gemini` starts a Gemini-only bridge. `make run-cli` starts a combined bridge that can route requests to either Codex CLI or Gemini CLI behind one ngrok URL.
-
-Combined bridge defaults:
-- `http://localhost:8350/health`
-- `http://localhost:8350/v1/models`
-- `http://localhost:8350/v1/chat/completions`
-- `http://localhost:8350/v1/responses`
-
-Model routing:
-- `model: "codex-cli"` routes to Codex CLI
-- `model: "gemini-cli"` routes to Gemini CLI
-- configured `CODEX_MODEL` and `GEMINI_MODEL` are also advertised when set
-- in combined mode, `gemini-*` model names route to Gemini; `o*`, `gpt*`, and `codex*` names route to Codex
-
-Recommended env values:
-```env
-CLI_BRIDGE_AUTH_TOKEN=change_me
-CLI_BRIDGE_DEFAULT_PROVIDER=codex
-GEMINI_SANDBOX=true
-GEMINI_MAX_CONCURRENCY=1
-GEMINI_REQUEST_TIMEOUT_SECONDS=900
-```
-
-Gemini prerequisites:
-- `gemini` CLI installed and available on `PATH`
-- Gemini authenticated locally
-
-Example Gemini request:
-```bash
-curl https://YOUR_PUBLIC_URL/v1/chat/completions \
-  -H "Authorization: Bearer YOUR_BRIDGE_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "model": "gemini-cli",
-    "messages": [
-      {"role": "user", "content": "Reply with exactly ok"}
-    ]
-  }'
-```
-
 ### CLI bridge attachments
-The Codex, Gemini, and combined CLI bridge modes accept OpenAI-style multimodal JSON and multipart uploads. Attachments are saved into a temporary per-request directory, exposed to the CLI backend with `--add-dir` for Codex or `--include-directories` for Gemini, and described in the rendered prompt by filesystem path. Text-like files also get a bounded inline preview.
+The Codex CLI bridge mode accepts OpenAI-style multimodal JSON and multipart uploads. Attachments are saved into a temporary per-request directory, exposed to the CLI backend with `--add-dir` for Codex, and described in the rendered prompt by filesystem path. Text-like files also get a bounded inline preview.
 
 Supported JSON content parts include:
 - `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}`
@@ -269,7 +212,7 @@ curl https://YOUR_PUBLIC_URL/v1/chat/completions \
   -H "Authorization: Bearer YOUR_BRIDGE_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{
-    \"model\": \"gemini-cli\",
+    \"model\": \"codex-cli\",
     \"messages\": [
       {
         \"role\": \"user\",
