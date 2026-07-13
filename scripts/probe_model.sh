@@ -2,6 +2,9 @@
 
 set -euo pipefail
 
+SCRIPT_DIR="${0:A:h}"
+source "$SCRIPT_DIR/common.sh"
+
 if [[ $# -lt 1 ]]; then
   print "Usage: ./scripts/probe_model.sh MODEL [PROMPT]" >&2
   exit 1
@@ -9,48 +12,6 @@ fi
 
 MODEL_ID="$1"
 PROMPT_TEXT="${2:-Reply with exactly ok}"
-
-normalize_v1_base() {
-  local base="${1%/}"
-  if [[ -z "$base" ]]; then
-    return 1
-  fi
-
-  if [[ "$base" == */v1 ]]; then
-    print -r -- "$base"
-  else
-    print -r -- "$base/v1"
-  fi
-}
-
-detect_public_base() {
-  local explicit="${PUBLIC_BASE_URL:-}"
-  if [[ -n "$explicit" ]]; then
-    normalize_v1_base "$explicit"
-    return 0
-  fi
-
-  local ngrok_api="${NGROK_API_URL:-http://127.0.0.1:4040/api/tunnels}"
-  local body
-  local http_status
-  body="$(mktemp)"
-  http_status="$(curl -sS -m 5 -o "$body" -w '%{http_code}' "$ngrok_api" || true)"
-
-  if [[ "$http_status" != "200" ]]; then
-    rm -f "$body"
-    return 1
-  fi
-
-  local public_url
-  public_url="$(jq -r '.tunnels[]? | select(.public_url | startswith("https://")) | .public_url' "$body" | head -n 1)"
-  rm -f "$body"
-
-  if [[ -z "$public_url" ]]; then
-    return 1
-  fi
-
-  normalize_v1_base "$public_url"
-}
 
 summarize_body() {
   local body="$1"
@@ -89,25 +50,28 @@ probe_endpoint() {
   local payload
   local http_status
 
-  body="$(mktemp)"
-  payload="$(mktemp)"
+  make_temp_file
+  body="$REPLY"
+  make_temp_file
+  payload="$REPLY"
 
   jq -n \
     --arg model "$MODEL_ID" \
     --arg prompt "$PROMPT_TEXT" \
     '{model: $model, messages: [{role: "user", content: $prompt}]}' > "$payload"
 
-  http_status="$(curl -sS -m "${CURL_MAX_TIME:-180}" -o "$body" -w '%{http_code}' \
+  if ! http_status="$(curl -sS -m "${CURL_MAX_TIME:-180}" -o "$body" -w '%{http_code}' \
     "${base%/}/chat/completions" \
     -H 'Content-Type: application/json' \
-    --data @"$payload" || true)"
+    --data @"$payload")"; then
+    http_status="${http_status:-000}"
+  fi
 
   print
   print "[$name] ${base%/}/chat/completions"
   print "status: $http_status"
   summarize_body "$body"
-
-  rm -f "$body" "$payload"
+  [[ "$http_status" == "200" ]]
 }
 
 local_base="$(normalize_v1_base "${LLM_LOCAL_URL:-http://localhost:8317}")"
@@ -117,13 +81,16 @@ print "Model probe"
 print "model: $MODEL_ID"
 print "prompt: $PROMPT_TEXT"
 
-probe_endpoint "local" "$local_base"
-probe_endpoint "proxy" "$proxy_base"
+failures=0
+probe_endpoint "local" "$local_base" || (( failures += 1 ))
+probe_endpoint "proxy" "$proxy_base" || (( failures += 1 ))
 
 if public_base="$(detect_public_base 2>/dev/null)"; then
-  probe_endpoint "public" "$public_base"
+  probe_endpoint "public" "$public_base" || (( failures += 1 ))
 else
   print
   print "[public] skipped"
   print "PUBLIC_BASE_URL is unset and ngrok admin API is unavailable."
 fi
+
+(( failures == 0 ))

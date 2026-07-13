@@ -19,10 +19,11 @@ if ! command -v npm >/dev/null 2>&1; then
 fi
 
 echo "[post-create] Installing Codex CLI"
-npm install -g @openai/codex@latest
+CODEX_CLI_VERSION="${CODEX_CLI_VERSION:-0.142.5}"
+npm install -g "@openai/codex@${CODEX_CLI_VERSION}"
 
 echo "[post-create] Verifying CLI installs"
-codex --version || true
+codex --version
 
 cat <<'EOF'
 

@@ -8,7 +8,7 @@ This repo supports:
 - an optional Codex CLI bridge exposed through its own ngrok URL
 
 ## Prerequisites
-- Python 3.9+
+- Python 3.10+
 - ngrok account + auth token
 - Local LLM API already running for `make run`, `make run-llm`, or `make run-llm-direct`
 - Codex CLI installed/authenticated for the default `make run` bridge
@@ -45,9 +45,9 @@ This repo can run in GitHub Codespaces now.
 
 The included devcontainer:
 - uses Python 3.11
-- installs Node.js LTS to make CLI installation easier
+- installs Node.js 22 to make CLI installation easier
 - creates `.venv` and installs `requirements.txt`
-- installs `@openai/codex`
+- installs the tested `@openai/codex` version (`0.142.5` by default)
 - forwards ports `8330`, `8340`, `8350`, and `8360`
 
 After the Codespace is created:
@@ -94,6 +94,8 @@ If the combined router tunnel prints `https://example.ngrok-free.dev`, likely en
 
 The router merges `/v1/models` from the LLM proxy and CLI bridge. Requests using `model: "codex-cli"` route to the CLI bridge. Other model names route to the LLM proxy.
 
+The three internal services bind to `127.0.0.1`; only the ngrok edge is public. `/health` returns `503` until both the configured LLM readiness endpoint and CLI bridge are ready.
+
 If you set a reserved `NGROK_DOMAIN`, `make run` uses it for the combined public router. `COMBINED_NGROK_DOMAIN` overrides `NGROK_DOMAIN` for `make run`.
 
 For LLM-only behavior, use:
@@ -117,10 +119,15 @@ If ngrok prints `https://example.ngrok-free.dev`, likely endpoints are:
 - `make run-llm`: LLM-only mode via local retry proxy + ngrok
 - `make run-llm-direct`: direct LLM tunnel without the retry proxy
 - `make run-codex`: Codex CLI bridge via ngrok
+- `make check-models`: list models on the local, proxy, and detected public endpoints
+- `make probe-model MODEL=... PROMPT='...'`: send a diagnostic completion request
+- `make test`: run the complete unit test suite
 
 ## Configuration
 Required:
 - `NGROK_AUTH_TOKEN=...`
+
+The Make targets let each Python runner load these values directly from the process environment or `.env`; hard-coded Make defaults no longer override `.env` values.
 
 Common optional values:
 - `LLM_LOCAL_URL=http://localhost:8317`
@@ -141,11 +148,16 @@ Common optional values:
 - `PROXY_RETRY_ATTEMPTS=2`
 - `PROXY_RETRY_BACKOFF_SECONDS=0.35`
 - `PROXY_RETRY_MAX_BACKOFF_SECONDS=2.0`
-- `PROXY_RETRY_METHODS=GET,HEAD,POST`
+- `PROXY_RETRY_METHODS=GET,HEAD`
 - `PROXY_RETRY_ON_429=false`
 - `PROXY_RETRY_429_MAX_DELAY_SECONDS=30`
 - `PROXY_BUFFER_NON_STREAMING=true`
-- `PROXY_NONSTREAM_READ_RETRY_ATTEMPTS=1`
+- `PROXY_MAX_REQUEST_BODY_BYTES=41943040`
+- `PROXY_MAX_NONSTREAM_RESPONSE_BYTES=67108864`
+- `PROXY_CONNECT_TIMEOUT_SECONDS=15`
+- `PROXY_READ_TIMEOUT_SECONDS=300`
+- `ROUTER_MAX_REQUEST_BODY_BYTES=53477376`
+- `ROUTER_MAX_NONSTREAM_RESPONSE_BYTES=67108864`
 - `CLI_BRIDGE_MAX_ATTACHMENTS=8`
 - `CLI_BRIDGE_MAX_ATTACHMENT_BYTES=10485760`
 - `CLI_BRIDGE_MAX_TOTAL_ATTACHMENT_BYTES=26214400`
@@ -164,16 +176,26 @@ Local bridge defaults:
 
 Important behavior:
 - Codex requests are serialized by default with `CODEX_MAX_CONCURRENCY=1`
+- At most four additional requests are admitted to the queue by default
 - The bridge defaults to `CODEX_SANDBOX=read-only`
+- User configuration is ignored by default when the installed CLI supports `--ignore-user-config`; setting `CODEX_PROFILE` disables that flag because profiles live in user configuration
 - `stream=true` is not supported yet; requests are buffered until `codex exec` finishes
 - The bridge shells out to your local Codex CLI session
+- Bridge and ngrok credentials are removed from the Codex child environment
+- Model names must be advertised by `/v1/models`; arbitrary names are rejected
+
+The CLI bridge implements a non-streaming subset of the OpenAI request shapes. Tool calls, response-format controls, sampling parameters, token limits, and conversation continuation are not implemented; callers should not rely on those fields being honored.
+
+Security boundary: when no bridge token is configured, anyone who can reach the public URL can invoke the local Codex account. `read-only` prevents filesystem writes but is not a confidentiality boundary; the default workdir is this repository. For an intentionally unauthenticated deployment, use a dedicated OS account, set `CODEX_WORKDIR` to an isolated directory, avoid unrelated secrets in that account's environment, and treat the ngrok URL as sensitive.
 
 Recommended Codex env values:
 ```env
 CODEX_BRIDGE_AUTH_TOKEN=change_me
 CODEX_WORKDIR=/absolute/path/to/workdir
 CODEX_SANDBOX=read-only
+CODEX_IGNORE_USER_CONFIG=true
 CODEX_MAX_CONCURRENCY=1
+CLI_BRIDGE_MAX_QUEUED_REQUESTS=4
 CODEX_REQUEST_TIMEOUT_SECONDS=900
 ```
 
@@ -199,30 +221,33 @@ The Codex CLI bridge mode accepts OpenAI-style multimodal JSON and multipart upl
 
 Supported JSON content parts include:
 - `{"type":"image_url","image_url":{"url":"data:image/png;base64,..."}}`
-- `{"type":"input_image","image_url":"https://example.com/image.png"}`
+- `{"type":"input_image","image_url":"https://example.com/image.png"}` when remote URLs are explicitly enabled
 - `{"type":"input_file","filename":"notes.txt","mime_type":"text/plain","file_data":"..."}` where `file_data` is base64
 - `{"type":"file","file":{"filename":"notes.txt","file_data":"..."}}`
 
-Remote `http` and `https` attachments are downloaded with strict limits. Local path and `file://` references are disabled by default for safety because this bridge is commonly exposed through ngrok; enable them only for trusted clients with `CLI_BRIDGE_ALLOW_LOCAL_FILE_REFERENCES=true`.
+Remote `http` and `https` attachments and local path/`file://` references are disabled by default. Remote downloads perform public-IP and redirect checks when enabled, but should still be enabled only for trusted clients because DNS can change between validation and connection. Use `CLI_BRIDGE_ALLOW_REMOTE_URLS=true` or `CLI_BRIDGE_ALLOW_LOCAL_FILE_REFERENCES=true` only when the relevant source is required.
 
 Example JSON image request:
 ```bash
-IMAGE_B64="$(base64 -i image.png)"
+base64 < image.png | tr -d '\n' | jq -Rs '
+  {
+    model: "codex-cli",
+    messages: [{
+      role: "user",
+      content: [
+        {type: "text", text: "Describe this image."},
+        {type: "image_url", image_url: {url: ("data:image/png;base64," + .)}}
+      ]
+    }]
+  }
+' > request.json
+
 curl https://YOUR_PUBLIC_URL/v1/chat/completions \
   -H "Authorization: Bearer YOUR_BRIDGE_TOKEN" \
   -H "Content-Type: application/json" \
-  -d "{
-    \"model\": \"codex-cli\",
-    \"messages\": [
-      {
-        \"role\": \"user\",
-        \"content\": [
-          {\"type\": \"text\", \"text\": \"Describe this image.\"},
-          {\"type\": \"image_url\", \"image_url\": {\"url\": \"data:image/png;base64,$IMAGE_B64\"}}
-        ]
-      }
-    ]
-  }"
+  --data-binary @request.json
+
+rm request.json
 ```
 
 Example multipart file request:
@@ -238,9 +263,12 @@ Attachment limits are controlled with:
 CLI_BRIDGE_MAX_ATTACHMENTS=8
 CLI_BRIDGE_MAX_ATTACHMENT_BYTES=10485760
 CLI_BRIDGE_MAX_TOTAL_ATTACHMENT_BYTES=26214400
+CLI_BRIDGE_MAX_REQUEST_BYTES=53477376
 CLI_BRIDGE_ATTACHMENT_DOWNLOAD_TIMEOUT_SECONDS=15
 CLI_BRIDGE_TEXT_PREVIEW_CHARS=12000
 CLI_BRIDGE_ALLOW_LOCAL_FILE_REFERENCES=false
+CLI_BRIDGE_ALLOW_REMOTE_URLS=false
+CLI_BRIDGE_MAX_QUEUED_REQUESTS=4
 ```
 
 Image understanding depends on the selected CLI/model. The bridge makes image files available by path and asks the backend to inspect them, but a backend that cannot process images may still be limited to file metadata or text previews.
@@ -251,14 +279,13 @@ For transient upstream hiccups, proxy calls retry automatically with exponential
 Default retry methods:
 - `GET`
 - `HEAD`
-- `POST`
 
-To customize:
+Generation `POST` requests are not retried by default because replaying them can duplicate work and cost. To opt in explicitly:
 ```env
 PROXY_RETRY_METHODS=GET,HEAD,POST
 ```
 
-Retrying `POST` can repeat a request if the upstream partially processed the first attempt.
+All connection, status, and non-streaming body-read retries share the single `PROXY_RETRY_ATTEMPTS` budget, so the default budget can never send more than three total attempts.
 
 By default, `429 Too Many Requests` is not retried. To enable bounded `Retry-After` support:
 ```env
@@ -266,7 +293,7 @@ PROXY_RETRY_ON_429=true
 PROXY_RETRY_429_MAX_DELAY_SECONDS=30
 ```
 
-For non-streaming calls (`stream=false`), the proxy buffers the full upstream body before returning it. If the body read fails after headers, the proxy can retry the full request using `PROXY_NONSTREAM_READ_RETRY_ATTEMPTS`.
+For non-streaming calls (`stream=false`), the proxy buffers the upstream body up to `PROXY_MAX_NONSTREAM_RESPONSE_BYTES` before returning it. Request bodies are likewise capped by `PROXY_MAX_REQUEST_BODY_BYTES`; the combined router has corresponding `ROUTER_MAX_*` limits. Connect, write, read, pool, health, and router model-list timeouts are finite and configurable in `.env.example`.
 
 ## Smoke test
 ```bash

@@ -1,5 +1,10 @@
 .venv/
 __pycache__/
+.pytest_cache/
+.coverage
+htmlcov/
 *.pyc
 .env
+.env.*
+!.env.example
 .DS_Store

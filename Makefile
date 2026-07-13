@@ -1,12 +1,6 @@
 SHELL := /bin/zsh
 
-LLM_LOCAL_URL ?= http://localhost:8317
-LLM_PROXY_PORT ?= 8330
-CLI_BRIDGE_PORT ?= 8350
-COMBINED_PROXY_PORT ?= 8360
-CLI_BRIDGE_PROVIDERS ?= codex
-
-.PHONY: setup run run-all help run-llm run-llm-direct run-codex check-models probe-model
+.PHONY: setup run run-all help run-llm run-llm-direct run-codex check-models probe-model test
 
 help:
 	@echo "Available targets:"
@@ -18,6 +12,7 @@ help:
 	@echo "  make run-codex  - expose local Codex CLI bridge via ngrok"
 	@echo "  make check-models - list models on local, proxy, and public endpoints"
 	@echo "  make probe-model MODEL=... PROMPT='...' - probe one model via chat completions"
+	@echo "  make test       - run the complete unit test suite"
 
 setup:
 	@test -d .venv || python3 -m venv .venv
@@ -28,13 +23,13 @@ setup:
 run: run-all
 
 run-all:
-	@. .venv/bin/activate && python run_all_pipeline.py --llm-url $(LLM_LOCAL_URL) --llm-proxy-port $(LLM_PROXY_PORT) --cli-bridge-port $(CLI_BRIDGE_PORT) --router-port $(COMBINED_PROXY_PORT) --providers $(CLI_BRIDGE_PROVIDERS)
+	@. .venv/bin/activate && python run_all_pipeline.py
 
 run-llm:
-	@. .venv/bin/activate && python run_llm_pipeline.py --llm-url $(LLM_LOCAL_URL) --proxy-port $(LLM_PROXY_PORT)
+	@. .venv/bin/activate && python run_llm_pipeline.py
 
 run-llm-direct:
-	@. .venv/bin/activate && python run.py --local-url $(LLM_LOCAL_URL)
+	@. .venv/bin/activate && python run.py
 
 run-codex:
 	@. .venv/bin/activate && python run_codex_pipeline.py
@@ -45,3 +40,6 @@ check-models:
 probe-model:
 	@test -n "$(MODEL)" || (echo "Set MODEL=..." && exit 1)
 	@./scripts/probe_model.sh "$(MODEL)" "$(PROMPT)"
+
+test:
+	@. .venv/bin/activate && python -m unittest discover -v

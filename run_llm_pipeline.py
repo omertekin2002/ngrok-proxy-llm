@@ -6,6 +6,7 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -25,13 +26,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--proxy-port",
         type=int,
-        default=int(os.getenv("LLM_PROXY_PORT", "8330")),
+        default=os.getenv("LLM_PROXY_PORT", "8330"),
         help="Port for local LLM retry proxy (default: 8330)",
     )
     parser.add_argument(
         "--startup-timeout",
         type=int,
-        default=int(os.getenv("LLM_PROXY_STARTUP_TIMEOUT", "120")),
+        default=os.getenv("LLM_PROXY_STARTUP_TIMEOUT", "120"),
         help="Seconds to wait for proxy startup (default: 120)",
     )
     parser.add_argument(
@@ -47,11 +48,18 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def wait_for_health(url: str, timeout_sec: int, proc: subprocess.Popen) -> None:
-    deadline = time.time() + timeout_sec
+def wait_for_health(
+    url: str,
+    timeout_sec: int,
+    proc: subprocess.Popen,
+    stop_event: threading.Event | None = None,
+) -> None:
+    deadline = time.monotonic() + max(1, timeout_sec)
     last_error = "unknown"
 
-    while time.time() < deadline:
+    while time.monotonic() < deadline:
+        if stop_event is not None and stop_event.is_set():
+            raise InterruptedError("Stopped while waiting for LLM proxy startup.")
         if proc.poll() is not None:
             raise RuntimeError("LLM proxy exited before becoming healthy.")
 
@@ -63,9 +71,14 @@ def wait_for_health(url: str, timeout_sec: int, proc: subprocess.Popen) -> None:
         except Exception as exc:  # noqa: BLE001
             last_error = str(exc)
 
-        time.sleep(1)
+        if stop_event is None:
+            time.sleep(1)
+        elif stop_event.wait(1):
+            raise InterruptedError("Stopped while waiting for LLM proxy startup.")
 
-    raise RuntimeError(f"Timed out waiting for LLM proxy health at {url}. Last error: {last_error}")
+    raise RuntimeError(
+        f"Timed out waiting for LLM proxy health at {url}. Last error: {last_error}"
+    )
 
 
 def terminate_process(proc: subprocess.Popen, name: str) -> None:
@@ -97,69 +110,70 @@ def main() -> int:
         "uvicorn",
         "llm_proxy:app",
         "--host",
-        "0.0.0.0",
+        "127.0.0.1",
         "--port",
         str(args.proxy_port),
     ]
 
-    print("Starting LLM retry proxy server...")
-    print(f"  LLM backend : {args.llm_url}")
-    print(f"  Local proxy : {proxy_url}")
-
-    proxy_proc = subprocess.Popen(proxy_cmd, cwd=repo_dir, env=proxy_env)
-
-    try:
-        wait_for_health(health_url, args.startup_timeout, proxy_proc)
-    except Exception as exc:  # noqa: BLE001
-        print(str(exc), file=sys.stderr)
-        terminate_process(proxy_proc, "llm proxy")
-        return 1
-
-    print("LLM retry proxy is healthy. Starting ngrok tunnel...")
-
-    tunnel_cmd = [
-        sys.executable,
-        "run.py",
-        "--local-url",
-        proxy_url,
-        "--health-path",
-        "/health",
-    ]
-    if args.region:
-        tunnel_cmd.extend(["--region", args.region])
-    if args.domain:
-        tunnel_cmd.extend(["--domain", args.domain])
-
-    tunnel_proc = subprocess.Popen(tunnel_cmd, cwd=repo_dir, env=os.environ.copy())
-
-    stop = False
+    stop_event = threading.Event()
 
     def _handle_signal(_signum, _frame):
-        nonlocal stop
-        stop = True
+        stop_event.set()
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    proxy_proc: subprocess.Popen | None = None
+    tunnel_proc: subprocess.Popen | None = None
     exit_code = 0
 
-    while not stop:
-        proxy_rc = proxy_proc.poll()
-        tunnel_rc = tunnel_proc.poll()
+    try:
+        print("Starting LLM retry proxy server...")
+        print(f"  LLM backend : {args.llm_url}")
+        print(f"  Local proxy : {proxy_url}")
+        proxy_proc = subprocess.Popen(proxy_cmd, cwd=repo_dir, env=proxy_env)
+        wait_for_health(health_url, args.startup_timeout, proxy_proc, stop_event)
 
-        if proxy_rc is not None:
-            print("LLM retry proxy stopped unexpectedly.", file=sys.stderr)
-            exit_code = proxy_rc or 1
-            break
+        print("LLM retry proxy is healthy. Starting ngrok tunnel...")
+        tunnel_cmd = [
+            sys.executable,
+            "run.py",
+            "--local-url",
+            proxy_url,
+            "--health-path",
+            "/health",
+            "--skip-health-check",
+        ]
+        if args.region:
+            tunnel_cmd.extend(["--region", args.region])
+        if args.domain:
+            tunnel_cmd.extend(["--domain", args.domain])
 
-        if tunnel_rc is not None:
-            exit_code = tunnel_rc
-            break
+        tunnel_proc = subprocess.Popen(tunnel_cmd, cwd=repo_dir, env=os.environ.copy())
 
-        time.sleep(0.5)
+        while not stop_event.wait(0.5):
+            proxy_rc = proxy_proc.poll()
+            tunnel_rc = tunnel_proc.poll()
 
-    terminate_process(tunnel_proc, "ngrok tunnel")
-    terminate_process(proxy_proc, "llm proxy")
+            if proxy_rc is not None:
+                print("LLM retry proxy stopped unexpectedly.", file=sys.stderr)
+                exit_code = proxy_rc or 1
+                break
+            if tunnel_rc is not None:
+                exit_code = tunnel_rc
+                break
+    except InterruptedError:
+        pass
+    except KeyboardInterrupt:
+        stop_event.set()
+    except Exception as exc:  # noqa: BLE001
+        print(str(exc), file=sys.stderr)
+        exit_code = 1
+    finally:
+        if tunnel_proc is not None:
+            terminate_process(tunnel_proc, "ngrok tunnel")
+        if proxy_proc is not None:
+            terminate_process(proxy_proc, "llm proxy")
     return exit_code
 
 
