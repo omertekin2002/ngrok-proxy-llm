@@ -55,7 +55,7 @@ detect_public_base() {
   fi
 
   local public_url
-  local expected_port="${COMBINED_PROXY_PORT:-8360}"
+  local expected_port="${LLM_PROXY_PORT:-8330}"
   public_url="$(jq -r --arg suffix ":${expected_port}" '
     [
       .tunnels[]?

@@ -1,15 +1,13 @@
 SHELL := /bin/zsh
 
-.PHONY: setup run run-all help run-llm run-llm-direct run-codex check-models probe-model test
+.PHONY: setup run help run-llm run-direct run-llm-direct check-models probe-model test
 
 help:
 	@echo "Available targets:"
 	@echo "  make setup      - create .venv, install deps, and create .env if missing"
-	@echo "  make run        - LLM retry proxy + CLI bridge behind one ngrok URL"
-	@echo "  make run-all    - same as make run"
-	@echo "  make run-llm    - LLM-only mode via local retry proxy + ngrok"
-	@echo "  make run-llm-direct - tunnel LLM endpoint directly (no retry proxy)"
-	@echo "  make run-codex  - expose local Codex CLI bridge via ngrok"
+	@echo "  make run        - LLM retry proxy behind one ngrok URL"
+	@echo "  make run-llm    - alias for make run"
+	@echo "  make run-direct - tunnel the LLM endpoint directly (no retry proxy)"
 	@echo "  make check-models - list models on local, proxy, and public endpoints"
 	@echo "  make probe-model MODEL=... PROMPT='...' - probe one model via chat completions"
 	@echo "  make test       - run the complete unit test suite"
@@ -20,19 +18,15 @@ setup:
 	@test -f .env || cp .env.example .env
 	@echo "Setup complete. Edit .env and set NGROK_AUTH_TOKEN if needed."
 
-run: run-all
-
-run-all:
-	@. .venv/bin/activate && python run_all_pipeline.py
-
-run-llm:
+run:
 	@. .venv/bin/activate && python run_llm_pipeline.py
 
-run-llm-direct:
+run-llm: run
+
+run-direct:
 	@. .venv/bin/activate && python run.py
 
-run-codex:
-	@. .venv/bin/activate && python run_codex_pipeline.py
+run-llm-direct: run-direct
 
 check-models:
 	@./scripts/check_models.sh

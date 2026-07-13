@@ -9,15 +9,15 @@ class CleanupConflictingTunnelsTests(unittest.TestCase):
     def test_find_conflicting_tunnels_matches_target_addr(self):
         matching = Mock(
             public_url="https://matching.ngrok-free.dev",
-            config={"addr": "http://localhost:8350"},
+            config={"addr": "http://localhost:8330"},
         )
         other = Mock(
             public_url="https://other.ngrok-free.dev",
-            config={"addr": "http://localhost:8330"},
+            config={"addr": "http://localhost:8317"},
         )
 
         with patch.object(run.ngrok, "get_tunnels", return_value=[matching, other]):
-            tunnels = run.find_conflicting_tunnels("http://localhost:8350", None)
+            tunnels = run.find_conflicting_tunnels("http://localhost:8330", None)
 
         self.assertEqual([matching], tunnels)
 
@@ -29,7 +29,7 @@ class CleanupConflictingTunnelsTests(unittest.TestCase):
 
         with patch.object(run.ngrok, "get_tunnels", return_value=[matching]):
             tunnels = run.find_conflicting_tunnels(
-                "http://localhost:8350", "fixed-domain.ngrok.app"
+                "http://localhost:8330", "fixed-domain.ngrok.app"
             )
 
         self.assertEqual([matching], tunnels)
@@ -37,7 +37,7 @@ class CleanupConflictingTunnelsTests(unittest.TestCase):
     def test_cleanup_disconnects_matching_tunnels_before_retry(self):
         matching = Mock(
             public_url="https://matching.ngrok-free.dev",
-            config={"addr": "http://localhost:8350"},
+            config={"addr": "http://localhost:8330"},
         )
 
         with (
@@ -45,7 +45,7 @@ class CleanupConflictingTunnelsTests(unittest.TestCase):
             patch.object(run.ngrok, "disconnect") as disconnect,
             patch.object(run.ngrok, "kill") as kill,
         ):
-            cleaned = run.cleanup_conflicting_tunnels("http://localhost:8350", None)
+            cleaned = run.cleanup_conflicting_tunnels("http://localhost:8330", None)
 
         self.assertTrue(cleaned)
         disconnect.assert_called_once_with(
@@ -56,7 +56,7 @@ class CleanupConflictingTunnelsTests(unittest.TestCase):
     def test_cleanup_does_not_kill_agent_when_tunnel_list_has_no_match(self):
         other = Mock(
             public_url="https://other.ngrok-free.dev",
-            config={"addr": "http://localhost:8330"},
+            config={"addr": "http://localhost:8317"},
         )
 
         with (
@@ -64,7 +64,7 @@ class CleanupConflictingTunnelsTests(unittest.TestCase):
             patch.object(run.ngrok, "disconnect") as disconnect,
             patch.object(run.ngrok, "kill") as kill,
         ):
-            cleaned = run.cleanup_conflicting_tunnels("http://localhost:8350", None)
+            cleaned = run.cleanup_conflicting_tunnels("http://localhost:8330", None)
 
         self.assertFalse(cleaned)
         disconnect.assert_not_called()
@@ -96,13 +96,13 @@ class CleanupConflictingTunnelsTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(RuntimeError, "after 1 attempts"):
                 run.connect_tunnel(
-                    target="http://localhost:8350",
+                    target="http://localhost:8330",
                     options={},
                     max_attempts=1,
                     initial_backoff_seconds=0.25,
                 )
 
-        cleanup.assert_called_once_with("http://localhost:8350", None, None)
+        cleanup.assert_called_once_with("http://localhost:8330", None, None)
 
     def test_connect_tunnel_observes_cancelled_event(self):
         stop_event = threading.Event()
@@ -111,7 +111,7 @@ class CleanupConflictingTunnelsTests(unittest.TestCase):
         with patch.object(run.ngrok, "connect") as connect:
             with self.assertRaises(InterruptedError):
                 run.connect_tunnel(
-                    target="http://localhost:8350",
+                    target="http://localhost:8330",
                     options={},
                     max_attempts=0,
                     initial_backoff_seconds=1.0,
