@@ -8,6 +8,7 @@ help:
 	@echo "  make run        - LLM retry proxy behind one ngrok URL"
 	@echo "  make run-llm    - alias for make run"
 	@echo "  make run-direct - tunnel the LLM endpoint directly (no retry proxy)"
+	@echo "  make run-llm-direct - alias for make run-direct"
 	@echo "  make check-models - list models on local, proxy, and public endpoints"
 	@echo "  make probe-model MODEL=... PROMPT='...' - probe one model via chat completions"
 	@echo "  make test       - run the complete unit test suite"

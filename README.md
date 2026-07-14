@@ -3,11 +3,13 @@
 Expose an existing OpenAI-compatible LLM API through a bounded retry proxy and
 an ngrok tunnel.
 
-The project has one runtime path:
+The default runtime path (`make run`) is:
 
 ```text
 public client -> ngrok -> LLM retry proxy -> local LLM backend
 ```
+
+`make run-direct` skips the retry proxy and tunnels the backend directly.
 
 The proxy forwards normal and streaming requests, preserves repeated response
 headers, enforces body limits, uses finite upstream timeouts, and retries only
@@ -142,7 +144,10 @@ make probe-model MODEL=gpt-5.4 PROMPT='Reply with exactly OK'
 ```
 
 The scripts check the backend and local proxy. They also check the public URL
-when `PUBLIC_BASE_URL` is set or exactly one local ngrok HTTPS tunnel is found.
+when `PUBLIC_BASE_URL` is set, or when the local ngrok admin API lists an HTTPS
+tunnel targeting the proxy port (`LLM_PROXY_PORT`, default `8330`). When no
+tunnel matches that port, a single listed HTTPS tunnel is used as a fallback;
+otherwise the public check is skipped.
 
 ## Codespaces
 
