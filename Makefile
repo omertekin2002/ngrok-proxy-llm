@@ -11,6 +11,7 @@ help:
 	@echo "  make run-llm-direct - alias for make run-direct"
 	@echo "  make check-models - list models on local, proxy, and public endpoints"
 	@echo "  make probe-model MODEL=... PROMPT='...' - probe one model via chat completions"
+	@echo "                   IMAGE=path|builtin     - optionally attach an image (vision check)"
 	@echo "  make test       - run the complete unit test suite"
 
 setup:
@@ -34,7 +35,7 @@ check-models:
 
 probe-model:
 	@test -n "$(MODEL)" || (echo "Set MODEL=..." && exit 1)
-	@./scripts/probe_model.sh "$(MODEL)" "$(PROMPT)"
+	@./scripts/probe_model.sh "$(MODEL)" "$(PROMPT)" "$(IMAGE)"
 
 test:
 	@. .venv/bin/activate && python -m unittest discover -v

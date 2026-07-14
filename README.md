@@ -143,6 +143,17 @@ Probe a specific model:
 make probe-model MODEL=gpt-5.4 PROMPT='Reply with exactly OK'
 ```
 
+Check vision support by attaching an image to the probe:
+
+```bash
+make probe-model MODEL=gpt-5.5 IMAGE=builtin
+```
+
+`IMAGE=builtin` attaches a bundled 64x64 red PNG as a base64 data URI; a
+vision-capable path replies with the word "red". `IMAGE=path/to/file` attaches
+your own png, jpg, jpeg, gif, or webp file. Image probes default the prompt to
+"Describe this image in one word."
+
 The scripts check the backend and local proxy. They also check the public URL
 when `PUBLIC_BASE_URL` is set, or when the local ngrok admin API lists an HTTPS
 tunnel targeting the proxy port (`LLM_PROXY_PORT`, default `8330`). When no
