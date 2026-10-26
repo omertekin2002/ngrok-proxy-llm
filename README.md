@@ -1,5 +1,7 @@
 # ngrok-proxy-llm
 
+[![CI](https://github.com/omertekin2002/ngrok-proxy-llm/actions/workflows/ci.yml/badge.svg)](https://github.com/omertekin2002/ngrok-proxy-llm/actions/workflows/ci.yml)
+
 Expose an existing OpenAI-compatible LLM API through a bounded retry proxy and
 an ngrok tunnel.
 
@@ -17,7 +19,7 @@ the HTTP methods you explicitly allow.
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.10 to 3.13 (the versions CI tests)
 - An ngrok account and auth token
 - An OpenAI-compatible LLM API already running locally
 
@@ -159,6 +161,14 @@ when `PUBLIC_BASE_URL` is set, or when the local ngrok admin API lists an HTTPS
 tunnel targeting the proxy port (`LLM_PROXY_PORT`, default `8330`). When no
 tunnel matches that port, a single listed HTTPS tunnel is used as a fallback;
 otherwise the public check is skipped.
+
+## Development
+
+Run the unit tests with `make test`. CI runs `python -m unittest discover -v`
+on Python 3.10, 3.11, 3.12, and 3.13 for every push and pull request, and
+syntax-checks `scripts/*.sh` with `zsh -n` and
+`.devcontainer/post-create.sh` with `bash -n`. CI needs no secrets and never
+contacts ngrok or an LLM backend.
 
 ## Codespaces
 
