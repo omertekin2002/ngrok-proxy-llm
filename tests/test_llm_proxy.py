@@ -95,6 +95,54 @@ class LlmProxyTests(unittest.TestCase):
 
         self.assertEqual(503, response.status_code)
         self.assertFalse(response.json()["ok"])
+        self.assertFalse(response.json()["backend_auth_required"])
+
+    def _health_with_backend_status(self, status):
+        probes = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            probes.append(request)
+            return httpx.Response(status, json={"error": "x"})
+
+        def make_client():
+            return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+        with patch.object(llm_proxy, "_new_http_client", side_effect=make_client):
+            with TestClient(llm_proxy.app) as client:
+                response = client.get("/health")
+
+        self.assertEqual(1, len(probes))
+        self.assertNotIn("authorization", probes[0].headers)
+        return response
+
+    def test_health_is_ready_when_backend_requires_credentials(self):
+        for status in (401, 403):
+            with self.subTest(status=status):
+                response = self._health_with_backend_status(status)
+
+                self.assertEqual(200, response.status_code)
+                payload = response.json()
+                self.assertTrue(payload["ok"])
+                self.assertTrue(payload["backend_auth_required"])
+                self.assertEqual(status, payload["backend_status"])
+                self.assertNotIn("error", payload)
+
+    def test_health_is_ready_and_not_auth_required_for_open_backend(self):
+        response = self._health_with_backend_status(200)
+
+        self.assertEqual(200, response.status_code)
+        self.assertFalse(response.json()["backend_auth_required"])
+
+    def test_health_is_503_for_other_non_success_statuses(self):
+        for status in (404, 500, 502):
+            with self.subTest(status=status):
+                response = self._health_with_backend_status(status)
+
+                self.assertEqual(503, response.status_code)
+                payload = response.json()
+                self.assertFalse(payload["ok"])
+                self.assertFalse(payload["backend_auth_required"])
+                self.assertIn(str(status), payload["error"])
 
     def test_post_is_not_retried_by_safe_default_methods(self):
         upstream_calls = 0
