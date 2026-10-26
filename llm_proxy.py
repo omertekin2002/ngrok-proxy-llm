@@ -103,6 +103,10 @@ HOP_BY_HOP_HEADERS = {
     "content-length",
 }
 
+# Readiness-probe statuses from a backend that enforces its own API keys. The
+# proxy sends no credentials, so these still mean the backend is up.
+BACKEND_AUTH_REQUIRED_STATUS_CODES = {401, 403}
+
 HeaderItems = List[Tuple[str, str]]
 RETRYABLE_UPSTREAM_ERRORS = (
     httpx.ConnectError,
@@ -222,16 +226,19 @@ async def health() -> Response:
     backend_url = f"{LLM_BASE_URL}{LLM_HEALTH_PATH}"
     backend_status: Optional[int] = None
     error: Optional[str] = None
+    auth_required = False
     try:
         async with _http_client().stream(
             "GET", backend_url, timeout=PROXY_HEALTH_TIMEOUT_SECONDS
         ) as response:
             backend_status = response.status_code
-            ready = response.is_success
+            auth_required = backend_status in BACKEND_AUTH_REQUIRED_STATUS_CODES
+            ready = response.is_success or auth_required
             if not ready:
                 error = f"Backend readiness probe returned HTTP {response.status_code}."
     except Exception as exc:
         ready = False
+        auth_required = False
         error = f"{type(exc).__name__}: {exc}"
 
     payload: Dict[str, Any] = {
@@ -239,6 +246,7 @@ async def health() -> Response:
         "backend": LLM_BASE_URL,
         "health_probe": backend_url,
         "backend_status": backend_status,
+        "backend_auth_required": auth_required,
         "retry_attempts": PROXY_RETRY_ATTEMPTS,
         "retry_status_codes": sorted(PROXY_RETRYABLE_STATUS_CODES),
         "retry_methods": sorted(PROXY_RETRYABLE_METHODS),

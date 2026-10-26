@@ -51,6 +51,38 @@ class LlmRunnerTests(unittest.TestCase):
             ),
         )
 
+    def test_llm_runner_exits_with_tunnel_refusal_code(self):
+        service = Mock()
+        service.poll.return_value = None
+        tunnel = Mock()
+        # run.py exits 1 when it refuses to publish an unauthenticated backend.
+        tunnel.poll.return_value = 1
+        stop_event = Mock()
+        stop_event.wait.return_value = False
+        args = SimpleNamespace(
+            llm_url="http://localhost:8317",
+            proxy_port=8330,
+            startup_timeout=5,
+            region=None,
+            domain=None,
+        )
+
+        with (
+            patch.object(run_llm_pipeline, "load_dotenv"),
+            patch.object(run_llm_pipeline, "parse_args", return_value=args),
+            patch.object(run_llm_pipeline.signal, "signal"),
+            patch.object(run_llm_pipeline.threading, "Event", return_value=stop_event),
+            patch.object(
+                run_llm_pipeline.subprocess, "Popen", side_effect=[service, tunnel]
+            ),
+            patch.object(run_llm_pipeline, "wait_for_health"),
+            patch.object(run_llm_pipeline, "terminate_process") as terminate,
+        ):
+            exit_code = run_llm_pipeline.main()
+
+        self.assertEqual(1, exit_code)
+        self.assertEqual(2, terminate.call_count)
+
 
 if __name__ == "__main__":
     unittest.main()

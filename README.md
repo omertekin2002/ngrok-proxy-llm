@@ -1,5 +1,7 @@
 # ngrok-proxy-llm
 
+[![CI](https://github.com/omertekin2002/ngrok-proxy-llm/actions/workflows/ci.yml/badge.svg)](https://github.com/omertekin2002/ngrok-proxy-llm/actions/workflows/ci.yml)
+
 Expose an existing OpenAI-compatible LLM API through a bounded retry proxy and
 an ngrok tunnel.
 
@@ -17,7 +19,7 @@ the HTTP methods you explicitly allow.
 
 ## Prerequisites
 
-- Python 3.10+
+- Python 3.10 to 3.13 (the versions CI tests)
 - An ngrok account and auth token
 - An OpenAI-compatible LLM API already running locally
 
@@ -44,7 +46,8 @@ make run
 ```
 
 The runner starts the proxy on `127.0.0.1:8330`, waits for its health check,
-then prints the ngrok URL. With a URL such as
+checks that the backend rejects requests without an API key (see
+[Security](#security)), then prints the ngrok URL. With a URL such as
 `https://example.ngrok-free.dev`, common endpoints are:
 
 - `https://example.ngrok-free.dev/health`
@@ -89,6 +92,11 @@ Common settings:
 - `LLM_PROXY_STARTUP_TIMEOUT=120`: seconds allowed for proxy startup
 - `LLM_HEALTH_PATH=/v1/models`: backend readiness endpoint
 - `LOCAL_URL=http://localhost:8317`: target used by direct-tunnel mode
+- `NGROK_AUTH_PROBE_PATH=/v1/models`: route requested without credentials
+  before publishing; the tunnel opens only if it answers `401` or `403`
+- `NGROK_ALLOW_UNAUTHENTICATED=false`: set to `true` (or pass
+  `--allow-unauthenticated` to `run.py`) to publish a backend that answers
+  without credentials
 - `NGROK_DOMAIN=your-subdomain.ngrok.app`: optional reserved domain
 - `NGROK_REGION=us`: optional ngrok region
 
@@ -160,6 +168,14 @@ tunnel targeting the proxy port (`LLM_PROXY_PORT`, default `8330`). When no
 tunnel matches that port, a single listed HTTPS tunnel is used as a fallback;
 otherwise the public check is skipped.
 
+## Development
+
+Run the unit tests with `make test`. CI runs `python -m unittest discover -v`
+on Python 3.10, 3.11, 3.12, and 3.13 for every push and pull request, and
+syntax-checks `scripts/*.sh` with `zsh -n` and
+`.devcontainer/post-create.sh` with `bash -n`. CI needs no secrets and never
+contacts ngrok or an LLM backend.
+
 ## Codespaces
 
 The included devcontainer uses Python 3.11, creates `.venv`, installs the Python
@@ -177,11 +193,43 @@ front of the service if it will be shared broadly.
 
 The proxy binds to `127.0.0.1`; only the ngrok edge is public.
 
+The backend's own API keys are the only access control: the proxy forwards
+the client's `Authorization` header unchanged and adds no credentials or
+authentication of its own. So before opening the tunnel (in both `make run`
+and `make run-direct`), the runner sends one `GET` to `NGROK_AUTH_PROBE_PATH`
+(default `/v1/models`) on the tunnel target, with no credentials:
+
+- `401` or `403`: the backend enforces its own keys, so the tunnel is published.
+- `2xx`: the backend answers anyone, so the runner refuses to publish and exits
+  with an error.
+- Any other status, or a connection error: the runner can't confirm the backend
+  requires a key, so it refuses too.
+
+To publish an unauthenticated backend anyway, set
+`NGROK_ALLOW_UNAUTHENTICATED=true` (or pass `--allow-unauthenticated` to
+`run.py`). The probe still runs and the runner prints a warning that the
+public URL is unauthenticated.
+
+A backend that leaves `/v1/models` open but protects its generation routes is
+refused by default. Point `NGROK_AUTH_PROBE_PATH` at a protected route, such as
+`/v1/chat/completions`, or opt out.
+
+The readiness checks also send no credentials, so the proxy's `/health` and the
+direct-mode startup check treat a `401` or `403` from the backend as "up".
+`/health` reports `"backend_auth_required": true` in that case.
+
 ## Troubleshooting
 
 - `Missing or placeholder NGROK_AUTH_TOKEN`: set the real token in `.env`
 - Proxy health returns `503`: verify `LLM_LOCAL_URL` and
   `curl http://localhost:8317/v1/models`
+- `Refusing to publish the tunnel: GET ... without credentials returned 200`:
+  the backend answers requests without an API key. Turn on the backend's
+  API-key check, point `NGROK_AUTH_PROBE_PATH` at a route it protects, or set
+  `NGROK_ALLOW_UNAUTHENTICATED=true` to publish it without authentication
+- `Refusing to publish the tunnel: ... could not confirm that the backend
+  requires an API key`: the probe got another status or no answer. Check that
+  `NGROK_AUTH_PROBE_PATH` exists on the backend, or opt out as above
 - Public diagnostics are skipped: set `PUBLIC_BASE_URL` or ensure the ngrok
   admin API is reachable
 - Tunnel drops after a network change: keep auto-reconnect enabled and tune the

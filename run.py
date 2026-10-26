@@ -5,12 +5,19 @@ import signal
 import sys
 import threading
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
 import httpx
 from dotenv import load_dotenv
 from pyngrok import conf, ngrok
+
+DEFAULT_AUTH_PROBE_PATH = "/v1/models"
+# Statuses that show the backend rejects requests without credentials.
+AUTH_REQUIRED_STATUS_CODES = {401, 403}
+ALLOW_UNAUTHENTICATED_HINT = (
+    "NGROK_ALLOW_UNAUTHENTICATED=true (or --allow-unauthenticated)"
+)
 
 
 def _parse_bool(value: Optional[str], default: bool = False) -> bool:
@@ -36,7 +43,28 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--skip-health-check",
         action="store_true",
-        help="Skip the local endpoint availability check.",
+        help=(
+            "Skip the local endpoint availability check. The unauthenticated "
+            "backend probe still runs."
+        ),
+    )
+    parser.add_argument(
+        "--auth-probe-path",
+        default=(os.getenv("NGROK_AUTH_PROBE_PATH") or "").strip()
+        or DEFAULT_AUTH_PROBE_PATH,
+        help=(
+            "Path requested without credentials before publishing; the tunnel "
+            f"opens only if it answers 401 or 403 (default: {DEFAULT_AUTH_PROBE_PATH})."
+        ),
+    )
+    parser.add_argument(
+        "--allow-unauthenticated",
+        action="store_true",
+        default=_parse_bool(os.getenv("NGROK_ALLOW_UNAUTHENTICATED")),
+        help=(
+            "Publish the tunnel even when the backend answers requests without "
+            "credentials. The public URL is then open to anyone who learns it."
+        ),
     )
     parser.add_argument(
         "--region",
@@ -97,10 +125,96 @@ def check_local_endpoint(base_url: str, health_path: str) -> None:
             f"Could not connect to local endpoint: {health_url}\n{exc}"
         ) from exc
 
-    if not 200 <= response.status_code < 300:
+    # A backend that enforces its own API keys answers 401/403 without one,
+    # which still means it is up.
+    if (
+        not 200 <= response.status_code < 300
+        and response.status_code not in AUTH_REQUIRED_STATUS_CODES
+    ):
         raise RuntimeError(
             f"Local endpoint returned {response.status_code} at {health_url}."
         )
+
+
+def _new_probe_client() -> httpx.Client:
+    # trust_env=False keeps .netrc credentials and proxy settings out of the probe.
+    return httpx.Client(timeout=10.0, follow_redirects=True, trust_env=False)
+
+
+def probe_backend_auth(
+    base_url: str, probe_path: str
+) -> Tuple[str, Optional[int], Optional[str]]:
+    """GET probe_path without credentials, as an anonymous public client would.
+
+    Returns (probe_url, status_code, error); exactly one of status_code and
+    error is set.
+    """
+    probe_url = normalize_health_url(base_url, probe_path)
+    parsed = urlparse(probe_url)
+    if parsed.username is not None or parsed.password is not None:
+        # httpx would turn URL userinfo into Basic auth; probe anonymously.
+        probe_url = parsed._replace(netloc=parsed.netloc.rpartition("@")[2]).geturl()
+    try:
+        with _new_probe_client() as client:
+            response = client.get(probe_url)
+    except Exception as exc:  # noqa: BLE001
+        return probe_url, None, f"{type(exc).__name__}: {exc}"
+    return probe_url, response.status_code, None
+
+
+def check_publish_allowed(
+    base_url: str, probe_path: str, allow_unauthenticated: bool
+) -> bool:
+    """Return True when the tunnel may be published.
+
+    The backend's own API keys are the only access control, so the tunnel opens
+    only when the backend rejects an unauthenticated request with 401/403, or
+    when the operator explicitly opts out.
+    """
+    probe_url, status, error = probe_backend_auth(base_url, probe_path)
+    request = f"GET {probe_url} without credentials"
+
+    if status in AUTH_REQUIRED_STATUS_CODES:
+        print(
+            f"[auth] {request} returned {status}: the backend requires its own "
+            "API key. Publishing the tunnel."
+        )
+        return True
+
+    backend_open = status is not None and 200 <= status < 300
+    if backend_open:
+        problem = (
+            f"{request} returned {status}, so anyone who learns the public URL "
+            "could use the backend"
+        )
+    elif status is not None:
+        problem = (
+            f"{request} returned {status}, so the runner could not confirm that "
+            "the backend requires an API key"
+        )
+    else:
+        problem = (
+            f"{request} failed ({error}), so the runner could not confirm that "
+            "the backend requires an API key"
+        )
+
+    if allow_unauthenticated:
+        print(
+            f"WARNING: {problem}. Publishing anyway because "
+            "NGROK_ALLOW_UNAUTHENTICATED / --allow-unauthenticated is set: the "
+            f"public URL {'is' if backend_open else 'may be'} unauthenticated.",
+            file=sys.stderr,
+        )
+        return True
+
+    print(
+        f"Refusing to publish the tunnel: {problem}.\n"
+        "Make the backend require an API key, point NGROK_AUTH_PROBE_PATH "
+        "(or --auth-probe-path) at a route it protects, or set "
+        f"{ALLOW_UNAUTHENTICATED_HINT} to publish it without authentication.",
+        file=sys.stderr,
+    )
+    return False
 
 
 def tunnel_target(local_url: str) -> str:
@@ -286,6 +400,20 @@ def main() -> int:
     if stop_event.is_set():
         return 0
 
+    try:
+        target = tunnel_target(args.local_url)
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+
+    # Runs even with --skip-health-check, which `make run` passes.
+    if not check_publish_allowed(
+        args.local_url, args.auth_probe_path, args.allow_unauthenticated
+    ):
+        return 1
+    if stop_event.is_set():
+        return 0
+
     pyngrok_config = conf.PyngrokConfig(region=args.region) if args.region else None
     ngrok.set_auth_token(token, pyngrok_config=pyngrok_config)
 
@@ -293,11 +421,6 @@ def main() -> int:
     if args.domain:
         options["domain"] = args.domain
 
-    try:
-        target = tunnel_target(args.local_url)
-    except ValueError as exc:
-        print(str(exc), file=sys.stderr)
-        return 1
     public_url: Optional[str] = None
 
     try:
