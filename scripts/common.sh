@@ -120,9 +120,10 @@ redact_api_key() {
   print -r -- "$text"
 }
 
-# Prints the first N characters of a file with the API key masked. It reads
-# enough bytes for N + len(key) characters even if each is a 4-byte UTF-8
-# sequence, so a key that straddles the cut is masked before the cut.
+# Prints the first N characters of a file with the API key masked. Only a
+# bounded prefix of the file is read; if that cuts the file, the tail of the
+# masked text, where a cut-off key could sit unmatched, is dropped before the
+# excerpt is taken.
 redacted_excerpt() {
   local file="$1"
   local limit="${2:-400}"
@@ -134,7 +135,15 @@ redacted_excerpt() {
     jq -c . "$file" > "$REPLY"
     file="$REPLY"
   fi
-  text="$(head -c $(( 4 * (limit + ${#key}) )) "$file" | redact_api_key)"
+  local json_key=""
+  if [[ -n "$key" ]]; then
+    json_key="$(print -rn -- "$key" | jq -Rsj '@json | .[1:-1]')"
+  fi
+  local read_bytes=$(( 4 * (limit + ${#json_key}) ))
+  text="$(head -c "$read_bytes" "$file" | redact_api_key)"
+  if [[ -n "$key" ]] && (( $(wc -c < "$file") > read_bytes )); then
+    text="${text[1,-$(( ${#json_key} + 1 ))]}"
+  fi
   print -r -- "${text[1,limit]}"
 }
 

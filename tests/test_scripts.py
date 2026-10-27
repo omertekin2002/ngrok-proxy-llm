@@ -301,6 +301,21 @@ class DiagnosticScriptTests(unittest.TestCase):
         self.assertNotIn("sk-multi", result.stdout)
         self._assert_key_hidden(result, wrong_key)
 
+    def test_excerpt_masks_key_cut_after_repeated_keys(self):
+        wrong_key = "sk-repeat-" + "x" * 121
+        # Each masked copy shrinks the text, pulling a key that the bounded
+        # read cut off into the excerpt's first 400 characters.
+        self.stub.error_prefix = f"Bearer {wrong_key}; " * 20
+
+        result = self._run(
+            "check_models.sh", env={**self._stub_urls(), "LLM_API_KEY": wrong_key}
+        )
+
+        self.assertEqual(3, result.stdout.count("status: 403"))
+        self.assertIn("Bearer [redacted]; ", result.stdout)
+        self.assertNotIn("sk-repeat", result.stdout)
+        self._assert_key_hidden(result, wrong_key)
+
     def test_json_escaped_key_is_masked(self):
         wrong_key = "sk/escaped-key-distinctive"
         self.stub.escape_slashes = True
