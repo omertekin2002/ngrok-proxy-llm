@@ -4,10 +4,11 @@ set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/common.sh"
+load_diagnostic_settings
 
 print_models() {
   local body="$1"
-  jq -r '.data[]?.id' "$body" | sort
+  jq -r '.data[]?.id' "$body" | sort | redact_api_key
 }
 
 check_endpoint() {
@@ -19,21 +20,23 @@ check_endpoint() {
 
   make_temp_file
   body="$REPLY"
-  if ! http_status="$(curl -sS -m "${CURL_MAX_TIME:-30}" -o "$body" -w '%{http_code}' "$url")"; then
+  auth_header_args
+  if ! http_status="$(curl -sS -m "${CURL_MAX_TIME:-30}" -o "$body" -w '%{http_code}' \
+    "${reply[@]}" "$url")"; then
     http_status="${http_status:-000}"
   fi
 
   print
   print "[$name] $url"
   print "status: $http_status"
+  print_auth_hint "$http_status"
 
   if [[ "$http_status" == "200" ]] && jq -e '.data' "$body" >/dev/null 2>&1; then
     print_models "$body"
     return 0
   else
     print "response:"
-    head -c 400 "$body"
-    print
+    redacted_excerpt "$body" 400
   fi
 
   return 1

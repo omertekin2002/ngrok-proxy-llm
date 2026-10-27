@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/common.sh"
+load_diagnostic_settings
 
 if [[ $# -lt 1 ]]; then
   print "Usage: ./scripts/probe_model.sh MODEL [PROMPT] [IMAGE]" >&2
@@ -87,8 +88,7 @@ summarize_body() {
   local body="$1"
   if ! jq -e '.' "$body" >/dev/null 2>&1; then
     print "response:"
-    head -c 400 "$body"
-    print
+    redacted_excerpt "$body" 400
     return 0
   fi
 
@@ -110,7 +110,7 @@ summarize_body() {
       "top_keys: " + ((keys | join(", ")) // "")
     end
   ' "$body")"
-  print "$summary"
+  print -r -- "$summary" | redact_api_key
 }
 
 probe_endpoint() {
@@ -126,10 +126,12 @@ probe_endpoint() {
   payload="$REPLY"
 
   build_payload "$payload"
+  auth_header_args
 
   if ! http_status="$(curl -sS -m "${CURL_MAX_TIME:-180}" -o "$body" -w '%{http_code}' \
     "${base%/}/chat/completions" \
     -H 'Content-Type: application/json' \
+    "${reply[@]}" \
     --data @"$payload")"; then
     http_status="${http_status:-000}"
   fi
@@ -137,6 +139,7 @@ probe_endpoint() {
   print
   print "[$name] ${base%/}/chat/completions"
   print "status: $http_status"
+  print_auth_hint "$http_status"
   summarize_body "$body"
   [[ "$http_status" == "200" ]]
 }
