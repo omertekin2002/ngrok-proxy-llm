@@ -162,6 +162,18 @@ vision-capable path replies with the word "red". `IMAGE=path/to/file` attaches
 your own png, jpg, jpeg, gif, or webp file. Image probes default the prompt to
 "Describe this image in one word."
 
+When the backend requires an API key (the setup `make run` expects, see
+[Security](#security)), set `LLM_API_KEY` in the environment or `.env`. The
+scripts then send `Authorization: Bearer <key>` to the local, proxy, and
+public endpoints. They pass the header to `curl` from a private temp file, so
+the key never appears in process arguments, and they mask it in everything
+they print. The proxy itself never adds the key; clients send their own.
+
+The scripts read `LLM_API_KEY`, `LLM_LOCAL_URL`, `LLM_PROXY_URL`,
+`LLM_PROXY_PORT`, `PUBLIC_BASE_URL`, `NGROK_API_URL`, and `CURL_MAX_TIME` from
+the environment first and then from the repository's `.env`. They parse those
+`KEY=value` lines; they never source or execute the file.
+
 The scripts check the backend and local proxy. They also check the public URL
 when `PUBLIC_BASE_URL` is set, or when the local ngrok admin API lists an HTTPS
 tunnel targeting the proxy port (`LLM_PROXY_PORT`, default `8330`). When no
@@ -171,8 +183,9 @@ otherwise the public check is skipped.
 ## Development
 
 Run the unit tests with `make test`. CI runs `python -m unittest discover -v`
-on Python 3.10, 3.11, 3.12, and 3.13 for every push and pull request, and
-syntax-checks `scripts/*.sh` with `zsh -n` and
+on Python 3.10, 3.11, 3.12, and 3.13 for every push and pull request,
+including tests that run the diagnostic scripts against a local stub backend.
+It also syntax-checks `scripts/*.sh` with `zsh -n` and
 `.devcontainer/post-create.sh` with `bash -n`. CI needs no secrets and never
 contacts ngrok or an LLM backend.
 
@@ -230,6 +243,9 @@ direct-mode startup check treat a `401` or `403` from the backend as "up".
 - `Refusing to publish the tunnel: ... could not confirm that the backend
   requires an API key`: the probe got another status or no answer. Check that
   `NGROK_AUTH_PROBE_PATH` exists on the backend, or opt out as above
+- `make check-models` or `make probe-model` shows `status: 401` or `403`: the
+  backend requires an API key. Set `LLM_API_KEY` in `.env` or the environment;
+  if it is already set, the backend rejected it, so check the key
 - Public diagnostics are skipped: set `PUBLIC_BASE_URL` or ensure the ngrok
   admin API is reachable
 - Tunnel drops after a network change: keep auto-reconnect enabled and tune the
