@@ -24,6 +24,7 @@ class StubBackend(ThreadingHTTPServer):
         # None means the backend answers without credentials.
         self.required_key = required_key
         self.auth_headers = []
+        self.content_prefix = "ok, you sent "
 
     @property
     def base_url(self):
@@ -88,7 +89,7 @@ class StubHandler(BaseHTTPRequestHandler):
                         {
                             "message": {
                                 "role": "assistant",
-                                "content": "ok, you sent "
+                                "content": self.server.content_prefix
                                 + str(self.headers.get("Authorization")),
                             }
                         }
@@ -198,6 +199,24 @@ class DiagnosticScriptTests(unittest.TestCase):
         self.assertIn("content: ok, you sent Bearer [redacted]", result.stdout)
         self.assertEqual([f"Bearer {VALID_KEY}"] * 3, self.stub.auth_headers)
         self._assert_key_hidden(result, VALID_KEY)
+
+    def test_probe_model_masks_key_straddling_the_content_cut(self):
+        key = "zq9-boundary-key-distinctive"
+        self.stub.required_key = key
+        # The probe prints the first 200 characters of the content; the
+        # echoed key starts just before that cut.
+        self.stub.content_prefix = "p" * 190
+
+        result = self._run(
+            "probe_model.sh",
+            "some-model",
+            env={**self._stub_urls(), "LLM_API_KEY": key},
+        )
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("content: " + "p" * 190 + "Bearer [re\n", result.stdout)
+        self.assertNotIn("zq9", result.stdout)
+        self._assert_key_hidden(result, key)
 
     def test_probe_model_with_builtin_image_succeeds_with_key(self):
         result = self._run(

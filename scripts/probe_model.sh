@@ -92,6 +92,17 @@ summarize_body() {
     return 0
   fi
 
+  if jq -e '(.error | not) and .choices and (.choices | length) > 0' "$body" >/dev/null 2>&1; then
+    # Mask the whole content before truncating it, so a key that straddles
+    # the cut can't leak a prefix.
+    local content
+    content="$(jq -r '(.choices[0].message.content // "") | tostring' "$body" | redact_api_key)"
+    jq -r '"model: " + (.model // "")' "$body" | redact_api_key
+    print -r -- "content: ${content[1,200]}"
+    jq -r '"images: " + (((.choices[0].message.images // []) | length) | tostring)' "$body"
+    return 0
+  fi
+
   local summary
   summary="$(jq -r '
     if .error then
@@ -99,12 +110,6 @@ summarize_body() {
         "error.code: " + (.error.code // ""),
         "error.type: " + (.error.type // ""),
         "error.message: " + (.error.message // "")
-      ] | join("\n")
-    elif .choices and (.choices | length) > 0 then
-      [
-        "model: " + (.model // ""),
-        "content: " + (((.choices[0].message.content // "") | tostring)[:200]),
-        "images: " + (((.choices[0].message.images // []) | length) | tostring)
       ] | join("\n")
     else
       "top_keys: " + ((keys | join(", ")) // "")
