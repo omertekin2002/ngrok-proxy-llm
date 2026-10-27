@@ -25,6 +25,7 @@ class StubBackend(ThreadingHTTPServer):
         self.required_key = required_key
         self.auth_headers = []
         self.content_prefix = "ok, you sent "
+        self.error_prefix = "Invalid credentials: "
 
     @property
     def base_url(self):
@@ -36,7 +37,7 @@ class StubHandler(BaseHTTPRequestHandler):
         pass
 
     def _send_json(self, status, payload):
-        body = json.dumps(payload).encode()
+        body = json.dumps(payload, ensure_ascii=False).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -58,7 +59,7 @@ class StubHandler(BaseHTTPRequestHandler):
                 "error": {
                     "code": "invalid_api_key",
                     "type": "auth",
-                    "message": f"Invalid credentials: {presented}",
+                    "message": f"{self.server.error_prefix}{presented}",
                 }
             },
         )
@@ -271,6 +272,26 @@ class DiagnosticScriptTests(unittest.TestCase):
                 self.assertIn("Bearer [redacted]", result.stdout)
                 self._assert_key_hidden(result, wrong_key)
 
+    def test_excerpt_masks_key_after_multibyte_text(self):
+        wrong_key = "sk-multibyte-0123456789abcdef"
+        # Two-byte characters put the echoed key across byte 400 + len(key),
+        # while it still starts within the excerpt's first 400 characters.
+        self.stub.error_prefix = "\u00e9" * 165
+
+        result = self._run(
+            "check_models.sh",
+            env={
+                **self._stub_urls(),
+                "LLM_API_KEY": wrong_key,
+                "LC_ALL": "C.UTF-8",
+            },
+        )
+
+        self.assertEqual(3, result.stdout.count("status: 403"))
+        self.assertIn("Bearer [redacted]", result.stdout)
+        self.assertNotIn("sk-multi", result.stdout)
+        self._assert_key_hidden(result, wrong_key)
+
     def test_open_backend_without_key_is_unchanged(self):
         open_stub = self._start_stub(None)
         for script, args in (
@@ -291,8 +312,8 @@ class DiagnosticScriptTests(unittest.TestCase):
         self._write_env_file(
             "# diagnostic settings\n"
             "\n"
-            f'LLM_API_KEY="{VALID_KEY}"\n'
-            f"export LLM_LOCAL_URL='{base}'\n"
+            f'LLM_API_KEY="{VALID_KEY}" # backend key\n'
+            f"export LLM_LOCAL_URL='{base}'#local\n"
             f"LLM_PROXY_URL = {base}   # inline comment\n"
             f"PUBLIC_BASE_URL={base}\r\n"
             "CURL_MAX_TIME=5\n"

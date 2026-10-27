@@ -36,8 +36,9 @@ typeset -ga DIAGNOSTIC_SETTINGS=(
 )
 
 # Read the named keys from a KEY=value file without sourcing or executing it.
-# Comments, blank lines and an optional `export ` prefix are ignored, matching
-# quotes around a value are stripped, and the last assignment of a key wins.
+# Comments (including one after a value), blank lines and an optional
+# `export ` prefix are ignored, matching quotes around a value are stripped,
+# and the last assignment of a key wins.
 # Variables already set in the environment are left alone.
 load_env_file_settings() {
   local env_file="$1"
@@ -60,7 +61,7 @@ load_env_file_settings() {
     key="${match[2]}"
     (( ${+wanted[$key]} )) || continue
     value="${match[3]}"
-    if [[ "$value" =~ '^"(.*)"[[:space:]]*$' || "$value" =~ "^'(.*)'[[:space:]]*\$" ]]; then
+    if [[ "$value" =~ '^"([^"]*)"[[:space:]]*(#.*)?$' || "$value" =~ "^'([^']*)'[[:space:]]*(#.*)?\$" ]]; then
       value="${match[1]}"
     else
       # Drop an inline comment (whitespace then #), then trailing whitespace.
@@ -114,14 +115,15 @@ redact_api_key() {
   print -r -- "$text"
 }
 
-# Prints the first N characters of a file with the API key masked. Reading
-# past N before masking keeps a key that straddles the cut from leaking.
+# Prints the first N characters of a file with the API key masked. It reads
+# enough bytes for N + len(key) characters even if each is a 4-byte UTF-8
+# sequence, so a key that straddles the cut is masked before the cut.
 redacted_excerpt() {
   local file="$1"
   local limit="${2:-400}"
   local key="${LLM_API_KEY:-}"
   local text
-  text="$(head -c $(( limit + ${#key} )) "$file" | redact_api_key)"
+  text="$(head -c $(( 4 * (limit + ${#key}) )) "$file" | redact_api_key)"
   print -r -- "${text[1,limit]}"
 }
 
