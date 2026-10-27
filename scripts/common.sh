@@ -21,6 +21,144 @@ make_temp_file() {
   TEMP_FILES+=("$REPLY")
 }
 
+# Repository-root .env, located from this file so the scripts work from any cwd.
+DIAGNOSTIC_ENV_FILE="${${(%):-%x}:A:h:h}/.env"
+
+# Settings the diagnostic scripts read from the environment or .env.
+typeset -ga DIAGNOSTIC_SETTINGS=(
+  LLM_API_KEY
+  LLM_LOCAL_URL
+  LLM_PROXY_URL
+  LLM_PROXY_PORT
+  PUBLIC_BASE_URL
+  NGROK_API_URL
+  CURL_MAX_TIME
+)
+
+# Read the named keys from a KEY=value file without sourcing or executing it.
+# Comments (including one after a value), blank lines and an optional
+# `export ` prefix are ignored, matching quotes around a value are stripped,
+# and the last assignment of a key wins.
+# Variables already set in the environment are left alone.
+load_env_file_settings() {
+  local env_file="$1"
+  shift
+  [[ -f "$env_file" && -r "$env_file" ]] || return 0
+  setopt local_options no_extended_glob no_glob_subst
+
+  local -A wanted found
+  local key
+  for key in "$@"; do
+    wanted[$key]=1
+  done
+
+  local line value
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    line="${line%$'\r'}"
+    if [[ ! "$line" =~ '^[[:space:]]*(export[[:space:]]+)?([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*=[[:space:]]*(.*)$' ]]; then
+      continue
+    fi
+    key="${match[2]}"
+    (( ${+wanted[$key]} )) || continue
+    value="${match[3]}"
+    if [[ "$value" =~ '^"([^"]*)"[[:space:]]*(#.*)?$' || "$value" =~ "^'([^']*)'[[:space:]]*(#.*)?\$" ]]; then
+      value="${match[1]}"
+    else
+      # Drop an inline comment (whitespace then #), then trailing whitespace.
+      value="${value%%[[:space:]]\#*}"
+      if [[ "$value" =~ '^(.*[^[:space:]])?[[:space:]]+$' ]]; then
+        value="${match[1]}"
+      fi
+    fi
+    found[$key]="$value"
+  done < "$env_file"
+
+  for key in "${(k)found[@]}"; do
+    if (( ! ${+parameters[$key]} )); then
+      typeset -g -- "$key=${found[$key]}"
+    fi
+  done
+}
+
+load_diagnostic_settings() {
+  load_env_file_settings "$DIAGNOSTIC_ENV_FILE" "${DIAGNOSTIC_SETTINGS[@]}"
+}
+
+# Sets `reply` to the curl arguments that add the backend API key, or to
+# nothing when LLM_API_KEY is unset. The header is written to a private temp
+# file and passed as `-H @file`, so the key never appears in curl's argv.
+AUTH_HEADER_FILE=""
+auth_header_args() {
+  reply=()
+  local key="${LLM_API_KEY:-}"
+  [[ -n "$key" ]] || return 0
+
+  if [[ "$key" == *[$'\r\n']* ]]; then
+    print "LLM_API_KEY must not contain line breaks." >&2
+    exit 1
+  fi
+  if [[ -z "$AUTH_HEADER_FILE" ]]; then
+    make_temp_file
+    AUTH_HEADER_FILE="$REPLY"
+    print -r -- "Authorization: Bearer $key" > "$AUTH_HEADER_FILE"
+  fi
+  reply=(-H "@$AUTH_HEADER_FILE")
+}
+
+# Copies stdin to stdout with every occurrence of LLM_API_KEY masked, both
+# as is and as it appears escaped inside a JSON string.
+redact_api_key() {
+  local text
+  text="$(cat)"
+  local key="${LLM_API_KEY:-}"
+  if [[ -n "$key" ]]; then
+    local json_key
+    json_key="$(print -rn -- "$key" | jq -Rsj '@json | .[1:-1]')"
+    text="${text//"$key"/[redacted]}"
+    text="${text//"$json_key"/[redacted]}"
+  fi
+  print -r -- "$text"
+}
+
+# Prints the first N characters of a file with the API key masked. Only a
+# bounded prefix of the file is read; if that cuts the file, the tail of the
+# masked text, where a cut-off key could sit unmatched, is dropped before the
+# excerpt is taken.
+redacted_excerpt() {
+  local file="$1"
+  local limit="${2:-400}"
+  local key="${LLM_API_KEY:-}"
+  local text
+  if [[ -n "$key" ]] && jq . "$file" >/dev/null 2>&1; then
+    # Re-serialize JSON so escapes such as \/ or \uXXXX can't hide the key.
+    make_temp_file
+    jq -c . "$file" > "$REPLY"
+    file="$REPLY"
+  fi
+  local json_key=""
+  if [[ -n "$key" ]]; then
+    json_key="$(print -rn -- "$key" | jq -Rsj '@json | .[1:-1]')"
+  fi
+  local read_bytes=$(( 4 * (limit + ${#json_key}) ))
+  text="$(head -c "$read_bytes" "$file" | redact_api_key)"
+  if [[ -n "$key" ]] && (( $(wc -c < "$file") > read_bytes )); then
+    text="${text[1,-$(( ${#json_key} + 1 ))]}"
+  fi
+  print -r -- "${text[1,limit]}"
+}
+
+# Prints a one-line hint after a 401 or 403 from an endpoint.
+print_auth_hint() {
+  local http_status="$1"
+  [[ "$http_status" == "401" || "$http_status" == "403" ]] || return 0
+
+  if [[ -n "${LLM_API_KEY:-}" ]]; then
+    print "hint: the backend rejected the key in LLM_API_KEY; check that it is valid."
+  else
+    print "hint: the backend requires an API key; set LLM_API_KEY in the environment or .env."
+  fi
+}
+
 normalize_v1_base() {
   local base="${1%/}"
   if [[ -z "$base" ]]; then
@@ -34,7 +172,12 @@ normalize_v1_base() {
   fi
 }
 
+# Prints the public /v1 base: PUBLIC_BASE_URL, else the ngrok tunnel that
+# targets LLM_PROXY_PORT, else the only listed HTTPS tunnel. Returns 1 when
+# there is none. With `matched-only`, returns 2 instead of taking that last
+# fallback, which may front another service.
 detect_public_base() {
+  local mode="${1:-}"
   local explicit="${PUBLIC_BASE_URL:-}"
   if [[ -n "$explicit" ]]; then
     normalize_v1_base "$explicit"
@@ -68,11 +211,41 @@ detect_public_base() {
   if [[ -z "$public_url" ]]; then
     local -a candidates
     candidates=("${(@f)$(jq -r '.tunnels[]? | select(.public_url | startswith("https://")) | .public_url' "$body")}")
-    if (( ${#candidates[@]} != 1 )); then
+    if (( ${#candidates[@]} != 1 )) || [[ -z "${candidates[1]}" ]]; then
       return 1
+    fi
+    if [[ "$mode" == "matched-only" ]]; then
+      return 2
     fi
     public_url="${candidates[1]}"
   fi
 
   normalize_v1_base "$public_url"
+}
+
+# Runs CHECK_FN on the public endpoint, or prints why it is skipped. With
+# LLM_API_KEY set, an ngrok tunnel is used only if it targets LLM_PROXY_PORT,
+# so the key never goes to a tunnel for another service.
+check_public_endpoint() {
+  local check_fn="$1"
+  local mode=""
+  local public_base
+  local detect_status=0
+  if [[ -n "${LLM_API_KEY:-}" ]]; then
+    mode="matched-only"
+  fi
+
+  public_base="$(detect_public_base "$mode" 2>/dev/null)" || detect_status=$?
+  if (( detect_status == 0 )); then
+    "$check_fn" "public" "$public_base"
+    return
+  fi
+
+  print
+  print "[public] skipped"
+  if (( detect_status == 2 )); then
+    print "The only ngrok tunnel does not target LLM_PROXY_PORT (${LLM_PROXY_PORT:-8330}), so LLM_API_KEY is not sent to it. Set PUBLIC_BASE_URL to check it."
+  else
+    print "PUBLIC_BASE_URL is unset and ngrok admin API is unavailable."
+  fi
 }

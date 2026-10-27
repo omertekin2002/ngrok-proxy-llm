@@ -4,6 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIR="${0:A:h}"
 source "$SCRIPT_DIR/common.sh"
+load_diagnostic_settings
 
 if [[ $# -lt 1 ]]; then
   print "Usage: ./scripts/probe_model.sh MODEL [PROMPT] [IMAGE]" >&2
@@ -87,8 +88,18 @@ summarize_body() {
   local body="$1"
   if ! jq -e '.' "$body" >/dev/null 2>&1; then
     print "response:"
-    head -c 400 "$body"
-    print
+    redacted_excerpt "$body" 400
+    return 0
+  fi
+
+  if jq -e '(.error | not) and .choices and (.choices | length) > 0' "$body" >/dev/null 2>&1; then
+    # Mask the whole content before truncating it, so a key that straddles
+    # the cut can't leak a prefix.
+    local content
+    content="$(jq -r '(.choices[0].message.content // "") | tostring' "$body" | redact_api_key)"
+    jq -r '"model: " + (.model // "")' "$body" | redact_api_key
+    print -r -- "content: ${content[1,200]}"
+    jq -r '"images: " + (((.choices[0].message.images // []) | length) | tostring)' "$body"
     return 0
   fi
 
@@ -100,17 +111,11 @@ summarize_body() {
         "error.type: " + (.error.type // ""),
         "error.message: " + (.error.message // "")
       ] | join("\n")
-    elif .choices and (.choices | length) > 0 then
-      [
-        "model: " + (.model // ""),
-        "content: " + (((.choices[0].message.content // "") | tostring)[:200]),
-        "images: " + (((.choices[0].message.images // []) | length) | tostring)
-      ] | join("\n")
     else
       "top_keys: " + ((keys | join(", ")) // "")
     end
   ' "$body")"
-  print "$summary"
+  print -r -- "$summary" | redact_api_key
 }
 
 probe_endpoint() {
@@ -126,10 +131,12 @@ probe_endpoint() {
   payload="$REPLY"
 
   build_payload "$payload"
+  auth_header_args
 
   if ! http_status="$(curl -sS -m "${CURL_MAX_TIME:-180}" -o "$body" -w '%{http_code}' \
     "${base%/}/chat/completions" \
     -H 'Content-Type: application/json' \
+    "${reply[@]}" \
     --data @"$payload")"; then
     http_status="${http_status:-000}"
   fi
@@ -137,6 +144,7 @@ probe_endpoint() {
   print
   print "[$name] ${base%/}/chat/completions"
   print "status: $http_status"
+  print_auth_hint "$http_status"
   summarize_body "$body"
   [[ "$http_status" == "200" ]]
 }
@@ -155,12 +163,6 @@ failures=0
 probe_endpoint "local" "$local_base" || (( failures += 1 ))
 probe_endpoint "proxy" "$proxy_base" || (( failures += 1 ))
 
-if public_base="$(detect_public_base 2>/dev/null)"; then
-  probe_endpoint "public" "$public_base" || (( failures += 1 ))
-else
-  print
-  print "[public] skipped"
-  print "PUBLIC_BASE_URL is unset and ngrok admin API is unavailable."
-fi
+check_public_endpoint probe_endpoint || (( failures += 1 ))
 
 (( failures == 0 ))

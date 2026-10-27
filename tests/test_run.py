@@ -334,6 +334,337 @@ class BackendAuthInterlockTests(unittest.TestCase):
             self.assertFalse(client.trust_env)
 
 
+OLD_URL = "https://old.ngrok-free.dev"
+NEW_URL = "https://new.ngrok-free.dev"
+
+
+def scripted_stop_event(checks):
+    """A stop event whose wait() lets the loop run `checks` times, then stops."""
+    stop_event = Mock()
+    stop_event.is_set.return_value = False
+    stop_event.wait.side_effect = [False] * checks + [True]
+    return stop_event
+
+
+def tunnel_list(*urls):
+    return [Mock(public_url=url) for url in urls]
+
+
+class ReconnectWatchdogTests(unittest.TestCase):
+    def _watch(self, *, checks, get_tunnels, connect=None, **arg_overrides):
+        """Run run.watch_tunnel() for `checks` iterations with ngrok mocked out."""
+        arg_overrides.setdefault("disable_auto_reconnect", False)
+        args = make_args(**arg_overrides)
+        state = run.TunnelState(public_url=OLD_URL)
+        stop_event = scripted_stop_event(checks)
+        stdout = io.StringIO()
+        options = {"domain": "fixed-domain.ngrok.app"}
+
+        with (
+            patch.object(run.ngrok, "get_tunnels", side_effect=get_tunnels) as gt,
+            patch.object(run.ngrok, "disconnect") as disconnect,
+            patch.object(run, "connect_tunnel", side_effect=connect) as ct,
+            contextlib.redirect_stdout(stdout),
+        ):
+            error = None
+            try:
+                run.watch_tunnel(
+                    state=state,
+                    args=args,
+                    target="http://localhost:8330",
+                    options=options,
+                    pyngrok_config=None,
+                    stop_event=stop_event,
+                )
+            except Exception as exc:
+                error = exc
+
+        return SimpleNamespace(
+            state=state,
+            stop_event=stop_event,
+            get_tunnels=gt,
+            disconnect=disconnect,
+            connect_tunnel=ct,
+            options=options,
+            error=error,
+            stdout=stdout.getvalue(),
+        )
+
+    def test_healthy_tunnel_is_not_reconnected(self):
+        result = self._watch(
+            checks=3, get_tunnels=lambda **_: tunnel_list(OLD_URL + "/")
+        )
+
+        self.assertIsNone(result.error)
+        self.assertEqual(3, result.get_tunnels.call_count)
+        result.connect_tunnel.assert_not_called()
+        result.disconnect.assert_not_called()
+        self.assertEqual(OLD_URL, result.state.public_url)
+        result.stop_event.wait.assert_called_with(15)
+
+    def test_healthy_check_resets_the_failure_counter(self):
+        # Down, up, down, up: never two failures in a row.
+        responses = iter([[], tunnel_list(OLD_URL), [], tunnel_list(OLD_URL)])
+        result = self._watch(
+            checks=4,
+            get_tunnels=lambda **_: next(responses),
+            reconnect_failure_threshold=2,
+        )
+
+        self.assertIsNone(result.error)
+        result.connect_tunnel.assert_not_called()
+        result.disconnect.assert_not_called()
+
+    def test_failures_below_threshold_do_not_reconnect(self):
+        result = self._watch(
+            checks=2,
+            get_tunnels=lambda **_: tunnel_list(NEW_URL),
+            reconnect_failure_threshold=3,
+        )
+
+        self.assertIsNone(result.error)
+        result.connect_tunnel.assert_not_called()
+        result.disconnect.assert_not_called()
+        self.assertNotIn("Reconnecting", result.stdout)
+
+    def test_reaching_threshold_disconnects_old_url_then_reconnects(self):
+        result = self._watch(
+            checks=2,
+            get_tunnels=lambda **_: [],
+            connect=lambda **_: Mock(public_url=OLD_URL),
+            reconnect_failure_threshold=2,
+            reconnect_max_attempts=5,
+            reconnect_initial_backoff_seconds=0.5,
+        )
+
+        self.assertIsNone(result.error)
+        result.disconnect.assert_called_once_with(OLD_URL, pyngrok_config=None)
+        result.connect_tunnel.assert_called_once_with(
+            target="http://localhost:8330",
+            options=result.options,
+            max_attempts=5,
+            initial_backoff_seconds=0.5,
+            pyngrok_config=None,
+            stop_event=result.stop_event,
+        )
+        self.assertIn(
+            "tunnel appears down after 2 failed checks. Reconnecting...",
+            result.stdout,
+        )
+
+    def test_disconnect_happens_before_reconnect(self):
+        manager = Mock()
+        manager.connect_tunnel.return_value = Mock(public_url=OLD_URL)
+        stop_event = scripted_stop_event(2)
+
+        with (
+            patch.object(run.ngrok, "get_tunnels", return_value=[]),
+            patch.object(run.ngrok, "disconnect", manager.disconnect),
+            patch.object(run, "connect_tunnel", manager.connect_tunnel),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            run.watch_tunnel(
+                state=run.TunnelState(public_url=OLD_URL),
+                args=make_args(disable_auto_reconnect=False),
+                target="http://localhost:8330",
+                options={},
+                pyngrok_config=None,
+                stop_event=stop_event,
+            )
+
+        self.assertEqual(
+            ["disconnect", "connect_tunnel"],
+            [name for name, _args, _kwargs in manager.mock_calls],
+        )
+
+    def test_reconnect_to_same_url_prints_reconnected(self):
+        result = self._watch(
+            checks=2,
+            get_tunnels=lambda **_: [],
+            connect=lambda **_: Mock(public_url=OLD_URL + "/"),
+        )
+
+        self.assertIsNone(result.error)
+        self.assertIn("[ngrok] tunnel reconnected.\n", result.stdout)
+        self.assertNotIn("new public URL", result.stdout)
+        self.assertNotIn("Tunnel is live", result.stdout)
+        self.assertEqual(OLD_URL, result.state.public_url)
+
+    def test_reconnect_to_new_url_reprints_tunnel_info(self):
+        result = self._watch(
+            checks=2,
+            get_tunnels=lambda **_: [],
+            connect=lambda **_: Mock(public_url=NEW_URL),
+        )
+
+        self.assertIsNone(result.error)
+        self.assertIn("tunnel reconnected with a new public URL.", result.stdout)
+        self.assertIn("Tunnel is live", result.stdout)
+        self.assertIn(f"Public URL: {NEW_URL}", result.stdout)
+        self.assertIn("Press Ctrl+C to stop and close the tunnel.", result.stdout)
+        self.assertEqual(NEW_URL, result.state.public_url)
+
+    def test_failure_counter_resets_after_reconnect(self):
+        result = self._watch(
+            checks=3,
+            get_tunnels=lambda **_: [],
+            connect=lambda **_: Mock(public_url=OLD_URL),
+            reconnect_failure_threshold=2,
+        )
+
+        self.assertIsNone(result.error)
+        # Checks 1-2 trigger a reconnect; check 3 is only one fresh failure.
+        result.connect_tunnel.assert_called_once()
+
+    def test_get_tunnels_error_counts_as_failed_check(self):
+        def broken(**_):
+            raise RuntimeError("agent unreachable")
+
+        result = self._watch(
+            checks=2,
+            get_tunnels=broken,
+            connect=lambda **_: Mock(public_url=OLD_URL),
+        )
+
+        self.assertIsNone(result.error)
+        self.assertIn(
+            "[ngrok] watchdog check failed: agent unreachable", result.stdout
+        )
+        result.connect_tunnel.assert_called_once()
+
+    def test_failed_disconnect_keeps_url_for_shutdown(self):
+        def refuse(**_):
+            raise RuntimeError("max attempts")
+
+        args = make_args(disable_auto_reconnect=False)
+        state = run.TunnelState(public_url=OLD_URL)
+
+        with (
+            patch.object(run.ngrok, "get_tunnels", return_value=[]),
+            patch.object(
+                run.ngrok, "disconnect", side_effect=RuntimeError("api down")
+            ),
+            patch.object(run, "connect_tunnel", side_effect=refuse),
+            contextlib.redirect_stdout(io.StringIO()),
+        ):
+            with self.assertRaises(RuntimeError):
+                run.watch_tunnel(
+                    state=state,
+                    args=args,
+                    target="http://localhost:8330",
+                    options={},
+                    pyngrok_config=None,
+                    stop_event=scripted_stop_event(2),
+                )
+
+        # The old tunnel may still be open, so shutdown should try again.
+        self.assertEqual(OLD_URL, state.public_url)
+
+    def test_disabled_auto_reconnect_never_checks_tunnels(self):
+        result = self._watch(
+            checks=5,
+            get_tunnels=lambda **_: [],
+            disable_auto_reconnect=True,
+        )
+
+        self.assertIsNone(result.error)
+        result.get_tunnels.assert_not_called()
+        result.connect_tunnel.assert_not_called()
+        self.assertEqual(6, result.stop_event.wait.call_count)
+        result.stop_event.wait.assert_called_with(0.25)
+
+    def _run_main(self, *, checks, get_tunnels, connect):
+        """Run run.main() past the startup checks into the watchdog loop."""
+        stdout, stderr = io.StringIO(), io.StringIO()
+        with (
+            patch.dict(run.os.environ, {"NGROK_AUTH_TOKEN": "dummy-token"}),
+            patch.object(run, "load_dotenv"),
+            patch.object(
+                run,
+                "parse_args",
+                return_value=make_args(disable_auto_reconnect=False),
+            ),
+            patch.object(run.signal, "signal"),
+            patch.object(
+                run.threading, "Event", return_value=scripted_stop_event(checks)
+            ),
+            patch.object(run, "check_publish_allowed", return_value=True),
+            patch.object(run.ngrok, "set_auth_token"),
+            patch.object(run.ngrok, "get_tunnels", side_effect=get_tunnels),
+            patch.object(run.ngrok, "disconnect") as disconnect,
+            patch.object(run, "connect_tunnel", side_effect=connect),
+            contextlib.redirect_stdout(stdout),
+            contextlib.redirect_stderr(stderr),
+        ):
+            exit_code = run.main()
+
+        return SimpleNamespace(
+            exit_code=exit_code,
+            disconnect=disconnect,
+            stdout=stdout.getvalue(),
+            stderr=stderr.getvalue(),
+        )
+
+    def test_shutdown_closes_the_new_url_after_reconnect(self):
+        tunnels = iter([Mock(public_url=OLD_URL), Mock(public_url=NEW_URL)])
+        result = self._run_main(
+            checks=2, get_tunnels=lambda **_: [], connect=lambda **_: next(tunnels)
+        )
+
+        self.assertEqual(0, result.exit_code)
+        self.assertEqual(
+            [
+                ((OLD_URL,), {"pyngrok_config": None}),
+                ((NEW_URL,), {"pyngrok_config": None}),
+            ],
+            [(c.args, c.kwargs) for c in result.disconnect.call_args_list],
+        )
+        self.assertIn("Tunnel closed.", result.stdout)
+
+    def test_failed_reconnect_returns_1_without_reclosing_old_url(self):
+        def connect(**_):
+            if connect.calls:
+                raise RuntimeError(
+                    "Failed to connect ngrok tunnel after 1 attempts: boom"
+                )
+            connect.calls += 1
+            return Mock(public_url=OLD_URL)
+
+        connect.calls = 0
+        result = self._run_main(checks=2, get_tunnels=lambda **_: [], connect=connect)
+
+        self.assertEqual(1, result.exit_code)
+        result.disconnect.assert_called_once_with(OLD_URL, pyngrok_config=None)
+        self.assertIn("Failed to connect ngrok tunnel after 1 attempts", result.stderr)
+        self.assertNotIn("Tunnel closed.", result.stdout)
+        self.assertNotIn("failed to close tunnel cleanly", result.stderr)
+
+    def test_stop_during_reconnect_returns_0(self):
+        def connect(**_):
+            if connect.calls:
+                raise InterruptedError("Tunnel connection cancelled.")
+            connect.calls += 1
+            return Mock(public_url=OLD_URL)
+
+        connect.calls = 0
+        result = self._run_main(checks=2, get_tunnels=lambda **_: [], connect=connect)
+
+        self.assertEqual(0, result.exit_code)
+        result.disconnect.assert_called_once_with(OLD_URL, pyngrok_config=None)
+        self.assertEqual("", result.stderr)
+
+    def test_healthy_run_closes_tunnel_on_stop(self):
+        result = self._run_main(
+            checks=3,
+            get_tunnels=lambda **_: tunnel_list(OLD_URL),
+            connect=lambda **_: Mock(public_url=OLD_URL),
+        )
+
+        self.assertEqual(0, result.exit_code)
+        result.disconnect.assert_called_once_with(OLD_URL, pyngrok_config=None)
+        self.assertIn("Tunnel closed.", result.stdout)
+
+
 class CheckLocalEndpointTests(unittest.TestCase):
     def _check(self, status):
         def handler(request: httpx.Request) -> httpx.Response:

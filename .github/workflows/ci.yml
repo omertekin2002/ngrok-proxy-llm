@@ -32,6 +32,11 @@ jobs:
           cache: pip
           cache-dependency-path: requirements.txt
 
+      - name: Install zsh
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends zsh
+
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip

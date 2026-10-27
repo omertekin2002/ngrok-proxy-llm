@@ -5,6 +5,7 @@ import signal
 import sys
 import threading
 import time
+from dataclasses import dataclass
 from typing import List, Optional, Tuple
 from urllib.parse import urlparse
 
@@ -371,6 +372,91 @@ def print_tunnel_info(public_url: str, local_url: str) -> None:
     print("=" * 60)
 
 
+@dataclass
+class TunnelState:
+    """The tunnel's current public URL, or None once it has been closed."""
+
+    public_url: Optional[str] = None
+
+
+def watch_tunnel(
+    *,
+    state: TunnelState,
+    args: argparse.Namespace,
+    target: str,
+    options: dict,
+    pyngrok_config: Optional[conf.PyngrokConfig],
+    stop_event: threading.Event,
+) -> None:
+    """Reconnect the tunnel when it drops, until stop_event is set.
+
+    Keeps state.public_url pointing at the open tunnel so the caller can close
+    it on shutdown. Raises whatever connect_tunnel raises during a reconnect.
+    """
+    check_seconds = max(1, args.reconnect_check_seconds)
+    failure_threshold = max(1, args.reconnect_failure_threshold)
+    consecutive_failures = 0
+
+    while not stop_event.wait(
+        check_seconds if not args.disable_auto_reconnect else 0.25
+    ):
+        if args.disable_auto_reconnect:
+            continue
+
+        public_url = state.public_url
+        try:
+            active_tunnels = ngrok.get_tunnels(pyngrok_config=pyngrok_config)
+            tunnel_healthy = any(
+                t.public_url and t.public_url.rstrip("/") == public_url
+                for t in active_tunnels
+            )
+        except Exception as exc:
+            print(f"[ngrok] watchdog check failed: {exc}")
+            tunnel_healthy = False
+
+        if tunnel_healthy:
+            consecutive_failures = 0
+            continue
+
+        consecutive_failures += 1
+        if consecutive_failures < failure_threshold:
+            continue
+
+        print(
+            f"[ngrok] tunnel appears down after {consecutive_failures} failed checks. "
+            "Reconnecting..."
+        )
+
+        if public_url:
+            try:
+                ngrok.disconnect(public_url, pyngrok_config=pyngrok_config)
+            except Exception:
+                pass
+            else:
+                # Closed: shutdown must not disconnect it again if the
+                # reconnect below fails.
+                state.public_url = None
+
+        tunnel = connect_tunnel(
+            target=target,
+            options=options,
+            max_attempts=args.reconnect_max_attempts,
+            initial_backoff_seconds=args.reconnect_initial_backoff_seconds,
+            pyngrok_config=pyngrok_config,
+            stop_event=stop_event,
+        )
+        new_public_url = tunnel.public_url.rstrip("/")
+        if new_public_url != public_url:
+            print("[ngrok] tunnel reconnected with a new public URL.")
+            print_tunnel_info(public_url=new_public_url, local_url=args.local_url)
+            print("Press Ctrl+C to stop and close the tunnel.")
+        else:
+            print("[ngrok] tunnel reconnected.")
+
+        state.public_url = new_public_url
+        consecutive_failures = 0
+
+
 def main() -> int:
     load_dotenv()
     args = parse_args()
@@ -421,7 +507,7 @@ def main() -> int:
     if args.domain:
         options["domain"] = args.domain
 
-    public_url: Optional[str] = None
+    state = TunnelState()
 
     try:
         tunnel = connect_tunnel(
@@ -432,77 +518,28 @@ def main() -> int:
             pyngrok_config=pyngrok_config,
             stop_event=stop_event,
         )
-        public_url = tunnel.public_url.rstrip("/")
+        state.public_url = tunnel.public_url.rstrip("/")
 
-        print_tunnel_info(public_url=public_url, local_url=args.local_url)
+        print_tunnel_info(public_url=state.public_url, local_url=args.local_url)
         print("Press Ctrl+C to stop and close the tunnel.")
 
-        check_seconds = max(1, args.reconnect_check_seconds)
-        failure_threshold = max(1, args.reconnect_failure_threshold)
-        consecutive_failures = 0
-
-        while not stop_event.wait(
-            check_seconds if not args.disable_auto_reconnect else 0.25
-        ):
-            if args.disable_auto_reconnect:
-                continue
-
-            try:
-                active_tunnels = ngrok.get_tunnels(pyngrok_config=pyngrok_config)
-                tunnel_healthy = any(
-                    t.public_url and t.public_url.rstrip("/") == public_url
-                    for t in active_tunnels
-                )
-            except Exception as exc:
-                print(f"[ngrok] watchdog check failed: {exc}")
-                tunnel_healthy = False
-
-            if tunnel_healthy:
-                consecutive_failures = 0
-                continue
-
-            consecutive_failures += 1
-            if consecutive_failures < failure_threshold:
-                continue
-
-            print(
-                f"[ngrok] tunnel appears down after {consecutive_failures} failed checks. "
-                "Reconnecting..."
-            )
-
-            if public_url:
-                try:
-                    ngrok.disconnect(public_url, pyngrok_config=pyngrok_config)
-                except Exception:
-                    pass
-
-            tunnel = connect_tunnel(
-                target=target,
-                options=options,
-                max_attempts=args.reconnect_max_attempts,
-                initial_backoff_seconds=args.reconnect_initial_backoff_seconds,
-                pyngrok_config=pyngrok_config,
-                stop_event=stop_event,
-            )
-            new_public_url = tunnel.public_url.rstrip("/")
-            if new_public_url != public_url:
-                print("[ngrok] tunnel reconnected with a new public URL.")
-                print_tunnel_info(public_url=new_public_url, local_url=args.local_url)
-                print("Press Ctrl+C to stop and close the tunnel.")
-            else:
-                print("[ngrok] tunnel reconnected.")
-
-            public_url = new_public_url
-            consecutive_failures = 0
+        watch_tunnel(
+            state=state,
+            args=args,
+            target=target,
+            options=options,
+            pyngrok_config=pyngrok_config,
+            stop_event=stop_event,
+        )
     except InterruptedError:
         pass
     except Exception as exc:
         print(str(exc), file=sys.stderr)
         return 1
     finally:
-        if public_url:
+        if state.public_url:
             try:
-                ngrok.disconnect(public_url, pyngrok_config=pyngrok_config)
+                ngrok.disconnect(state.public_url, pyngrok_config=pyngrok_config)
                 print("Tunnel closed.")
             except Exception as exc:
                 print(f"[ngrok] failed to close tunnel cleanly: {exc}", file=sys.stderr)
