@@ -163,12 +163,6 @@ failures=0
 probe_endpoint "local" "$local_base" || (( failures += 1 ))
 probe_endpoint "proxy" "$proxy_base" || (( failures += 1 ))
 
-if public_base="$(detect_public_base 2>/dev/null)"; then
-  probe_endpoint "public" "$public_base" || (( failures += 1 ))
-else
-  print
-  print "[public] skipped"
-  print "PUBLIC_BASE_URL is unset and ngrok admin API is unavailable."
-fi
+check_public_endpoint probe_endpoint || (( failures += 1 ))
 
 (( failures == 0 ))

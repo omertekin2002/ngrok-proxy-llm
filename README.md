@@ -178,7 +178,9 @@ The scripts check the backend and local proxy. They also check the public URL
 when `PUBLIC_BASE_URL` is set, or when the local ngrok admin API lists an HTTPS
 tunnel targeting the proxy port (`LLM_PROXY_PORT`, default `8330`). When no
 tunnel matches that port, a single listed HTTPS tunnel is used as a fallback;
-otherwise the public check is skipped.
+otherwise the public check is skipped. With `LLM_API_KEY` set, that fallback is
+skipped too, so the key goes only to `PUBLIC_BASE_URL` or to a tunnel that
+targets the proxy port.
 
 ## Development
 

@@ -26,6 +26,10 @@ class StubBackend(ThreadingHTTPServer):
         self.auth_headers = []
         self.content_prefix = "ok, you sent "
         self.error_prefix = "Invalid credentials: "
+        # Serialize "/" as "\/", a valid JSON escape some backends use.
+        self.escape_slashes = False
+        # Served at /api/tunnels, standing in for the ngrok admin API.
+        self.tunnels = []
 
     @property
     def base_url(self):
@@ -38,6 +42,8 @@ class StubHandler(BaseHTTPRequestHandler):
 
     def _send_json(self, status, payload):
         body = json.dumps(payload, ensure_ascii=False).encode()
+        if self.server.escape_slashes:
+            body = body.replace(b"/", b"\\/")
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
@@ -66,6 +72,9 @@ class StubHandler(BaseHTTPRequestHandler):
         return False
 
     def do_GET(self):
+        if self.path == "/api/tunnels":
+            self._send_json(200, {"tunnels": self.server.tunnels})
+            return
         if self.path != "/v1/models":
             self._send_json(404, {"error": {"message": "not found"}})
             return
@@ -291,6 +300,60 @@ class DiagnosticScriptTests(unittest.TestCase):
         self.assertIn("Bearer [redacted]", result.stdout)
         self.assertNotIn("sk-multi", result.stdout)
         self._assert_key_hidden(result, wrong_key)
+
+    def test_json_escaped_key_is_masked(self):
+        wrong_key = "sk/escaped-key-distinctive"
+        self.stub.escape_slashes = True
+        for script, args in (
+            ("check_models.sh", ()),
+            ("probe_model.sh", ("some-model",)),
+        ):
+            with self.subTest(script=script):
+                result = self._run(
+                    script, *args, env={**self._stub_urls(), "LLM_API_KEY": wrong_key}
+                )
+
+                self.assertEqual(3, result.stdout.count("status: 403"))
+                self.assertIn("Bearer [redacted]", result.stdout)
+                self.assertNotIn("escaped-key", result.stdout)
+                self._assert_key_hidden(result, wrong_key)
+
+    def _tunnel_env(self, addr):
+        self.stub.tunnels = [
+            {"public_url": "https://tunnel.invalid", "config": {"addr": addr}}
+        ]
+        env = self._stub_urls()
+        del env["PUBLIC_BASE_URL"]
+        env["NGROK_API_URL"] = f"{self.stub.base_url}/api/tunnels"
+        env["LLM_PROXY_PORT"] = "8330"
+        return env
+
+    def test_key_is_not_sent_to_a_tunnel_for_another_port(self):
+        env = self._tunnel_env("http://localhost:9999")
+
+        result = self._run("check_models.sh", env={**env, "LLM_API_KEY": VALID_KEY})
+
+        self.assertEqual(0, result.returncode, result.stdout + result.stderr)
+        self.assertIn("[public] skipped", result.stdout)
+        self.assertIn("does not target LLM_PROXY_PORT (8330)", result.stdout)
+        self.assertNotIn("tunnel.invalid", self._curl_argv())
+        self.assertEqual(2, self._curl_argv().count("-H @"))
+
+    def test_unmatched_tunnel_is_still_checked_without_key(self):
+        env = self._tunnel_env("http://localhost:9999")
+
+        result = self._run("check_models.sh", env=env)
+
+        self.assertIn("[public] https://tunnel.invalid/v1/models", result.stdout)
+        self.assertNotIn("-H @", self._curl_argv())
+
+    def test_key_is_sent_to_a_tunnel_for_the_proxy_port(self):
+        env = self._tunnel_env("http://localhost:8330")
+
+        result = self._run("check_models.sh", env={**env, "LLM_API_KEY": VALID_KEY})
+
+        self.assertIn("[public] https://tunnel.invalid/v1/models", result.stdout)
+        self.assertEqual(3, self._curl_argv().count("-H @"))
 
     def test_open_backend_without_key_is_unchanged(self):
         open_stub = self._start_stub(None)

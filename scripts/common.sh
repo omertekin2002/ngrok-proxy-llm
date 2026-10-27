@@ -105,12 +105,17 @@ auth_header_args() {
   reply=(-H "@$AUTH_HEADER_FILE")
 }
 
-# Copies stdin to stdout with every occurrence of LLM_API_KEY masked.
+# Copies stdin to stdout with every occurrence of LLM_API_KEY masked, both
+# as is and as it appears escaped inside a JSON string.
 redact_api_key() {
   local text
   text="$(cat)"
-  if [[ -n "${LLM_API_KEY:-}" ]]; then
-    text="${text//"$LLM_API_KEY"/[redacted]}"
+  local key="${LLM_API_KEY:-}"
+  if [[ -n "$key" ]]; then
+    local json_key
+    json_key="$(print -rn -- "$key" | jq -Rsj '@json | .[1:-1]')"
+    text="${text//"$key"/[redacted]}"
+    text="${text//"$json_key"/[redacted]}"
   fi
   print -r -- "$text"
 }
@@ -123,6 +128,12 @@ redacted_excerpt() {
   local limit="${2:-400}"
   local key="${LLM_API_KEY:-}"
   local text
+  if [[ -n "$key" ]] && jq . "$file" >/dev/null 2>&1; then
+    # Re-serialize JSON so escapes such as \/ or \uXXXX can't hide the key.
+    make_temp_file
+    jq -c . "$file" > "$REPLY"
+    file="$REPLY"
+  fi
   text="$(head -c $(( 4 * (limit + ${#key}) )) "$file" | redact_api_key)"
   print -r -- "${text[1,limit]}"
 }
@@ -152,7 +163,12 @@ normalize_v1_base() {
   fi
 }
 
+# Prints the public /v1 base: PUBLIC_BASE_URL, else the ngrok tunnel that
+# targets LLM_PROXY_PORT, else the only listed HTTPS tunnel. Returns 1 when
+# there is none. With `matched-only`, returns 2 instead of taking that last
+# fallback, which may front another service.
 detect_public_base() {
+  local mode="${1:-}"
   local explicit="${PUBLIC_BASE_URL:-}"
   if [[ -n "$explicit" ]]; then
     normalize_v1_base "$explicit"
@@ -186,11 +202,41 @@ detect_public_base() {
   if [[ -z "$public_url" ]]; then
     local -a candidates
     candidates=("${(@f)$(jq -r '.tunnels[]? | select(.public_url | startswith("https://")) | .public_url' "$body")}")
-    if (( ${#candidates[@]} != 1 )); then
+    if (( ${#candidates[@]} != 1 )) || [[ -z "${candidates[1]}" ]]; then
       return 1
+    fi
+    if [[ "$mode" == "matched-only" ]]; then
+      return 2
     fi
     public_url="${candidates[1]}"
   fi
 
   normalize_v1_base "$public_url"
+}
+
+# Runs CHECK_FN on the public endpoint, or prints why it is skipped. With
+# LLM_API_KEY set, an ngrok tunnel is used only if it targets LLM_PROXY_PORT,
+# so the key never goes to a tunnel for another service.
+check_public_endpoint() {
+  local check_fn="$1"
+  local mode=""
+  local public_base
+  local detect_status=0
+  if [[ -n "${LLM_API_KEY:-}" ]]; then
+    mode="matched-only"
+  fi
+
+  public_base="$(detect_public_base "$mode" 2>/dev/null)" || detect_status=$?
+  if (( detect_status == 0 )); then
+    "$check_fn" "public" "$public_base"
+    return
+  fi
+
+  print
+  print "[public] skipped"
+  if (( detect_status == 2 )); then
+    print "The only ngrok tunnel does not target LLM_PROXY_PORT (${LLM_PROXY_PORT:-8330}), so LLM_API_KEY is not sent to it. Set PUBLIC_BASE_URL to check it."
+  else
+    print "PUBLIC_BASE_URL is unset and ngrok admin API is unavailable."
+  fi
 }
